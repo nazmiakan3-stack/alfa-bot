@@ -1,4 +1,4 @@
-       #!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import json
@@ -186,11 +186,17 @@ def analyze(symbol):
 
 # --- SUNUCU, ANA DÖNGÜ VE KENDİ KENDİNİ UYANDIRMA SİSTEMİ ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
         self.wfile.write(b"<html><body><h1>Alfa Bot Aktif ve Calisiyor!</h1></body></html>")
+        
     def log_message(self, format, *args): 
         return
 
@@ -206,6 +212,7 @@ def self_ping():
         time.sleep(600)  # 10 dakikada bir çalışır (600 saniye)
         try:
             req = Request(url, headers={"User-Agent": "AlfaBot-KeepAlive"})
+            # self_ping de HEAD isteği atabilir, ancak basit bir GET isteği de sorun olmaz.
             with urlopen(req, timeout=10) as response:
                 print(f"[{now_date_text()}] \U0001F504 Self-Ping: Bot uyanik tutuluyor. (Durum: {response.status})")
         except Exception as e:
@@ -350,4 +357,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-         
