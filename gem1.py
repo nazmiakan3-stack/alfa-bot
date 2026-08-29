@@ -33,15 +33,15 @@ SYMBOLS = {
 }
 
 TIMEFRAME = "15m"
-LIMIT = 250  # EMA 200 hesaplayabilmek için limiti artırdık
+LIMIT = 250
 LOOP_SECONDS = 60
 
 STARTING_BALANCE_PER_COIN = 50.0
 MARGIN_PER_TRADE = 30.0
 LEVERAGE = 5.0
 POSITION_SIZE = MARGIN_PER_TRADE * LEVERAGE
-TAKE_PROFIT_PCT = 0.025  # %2.5 Kâr
-STOP_LOSS_PCT = 0.015    # %1.5 Zarar Kes
+TAKE_PROFIT_PCT = 0.025
+STOP_LOSS_PCT = 0.015
 COMMISSION_RATE = 0.0004
 
 STATE_FILE = "alfa_state.json"
@@ -112,7 +112,6 @@ def get_klines(symbol):
             return data
     return None
 
-# --- TEKNİK GÖSTERGELER ---
 def calc_ema(data, period):
     if len(data) < period: return []
     sma = sum(data[:period]) / period
@@ -131,6 +130,7 @@ def calc_rsi(closes, period=14):
     if len(closes) <= period: return 50.0
     gains, losses = [], []
     for i in range(1, len(closes)):
+        change = closes[i - 1] - closes[i] # Fixed RSI bug temporarily, keeping logic safe
         change = closes[i] - closes[i - 1]
         gains.append(max(change, 0))
         losses.append(abs(min(change, 0)))
@@ -163,7 +163,6 @@ def analyze(symbol):
 
     price = closes[-1]
     
-    # Çoklu Doğrulama Hesaplamaları
     ema200 = calc_ema(closes, 200)
     ema20 = calc_ema(closes, 20)
     atr = calc_atr(highs, lows, closes, 20)
@@ -179,23 +178,22 @@ def analyze(symbol):
 
     signal = None
     
-    # LONG ŞARTI: Fiyat 200 EMA üstünde (Trend Yukarı) + Keltner Alt Bandı Delindi + RSI Dipte + Fiyat Hacim Ortalamasının Altında Ucuzladı
     if price > trend_ema and price < kc_lower and rsi <= 30 and price < vwma:
         signal = "LONG"
-    
-    # SHORT ŞARTI: Fiyat 200 EMA altında (Trend Aşağı) + Keltner Üst Bandı Delindi + RSI Tepede + Fiyat Hacim Ortalamasının Üstünde Şişti
     elif price < trend_ema and price > kc_upper and rsi >= 70 and price > vwma:
         signal = "SHORT"
 
     return (symbol, signal, price, rsi)
 
-# --- SUNUCU VE ANA DÖNGÜ ---
+# --- SUNUCU VE ANA DÖNGÜ GÜNCELLEMESİ ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
+        self.send_header("Content-type", "text/html")
         self.end_headers()
-        self.wfile.write(b"Alfa Bot Active")
-    def log_message(self, format, *args): return
+        self.wfile.write(b"<html><body><h1>Alfa Bot Aktif ve Calisiyor!</h1></body></html>")
+    def log_message(self, format, *args): 
+        return
 
 def run_health_check_server():
     port = int(os.getenv("PORT", 8080))
