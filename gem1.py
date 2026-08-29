@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+       #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import json
@@ -130,7 +130,6 @@ def calc_rsi(closes, period=14):
     if len(closes) <= period: return 50.0
     gains, losses = [], []
     for i in range(1, len(closes)):
-        change = closes[i - 1] - closes[i] # Fixed RSI bug temporarily, keeping logic safe
         change = closes[i] - closes[i - 1]
         gains.append(max(change, 0))
         losses.append(abs(min(change, 0)))
@@ -185,7 +184,7 @@ def analyze(symbol):
 
     return (symbol, signal, price, rsi)
 
-# --- SUNUCU VE ANA DÖNGÜ GÜNCELLEMESİ ---
+# --- SUNUCU, ANA DÖNGÜ VE KENDİ KENDİNİ UYANDIRMA SİSTEMİ ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -200,8 +199,24 @@ def run_health_check_server():
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
+def self_ping():
+    # Render'daki URL'ni buraya yazdık. 
+    url = "https://alfa-bot-pj2b.onrender.com"
+    while True:
+        time.sleep(600)  # 10 dakikada bir çalışır (600 saniye)
+        try:
+            req = Request(url, headers={"User-Agent": "AlfaBot-KeepAlive"})
+            with urlopen(req, timeout=10) as response:
+                print(f"[{now_date_text()}] \U0001F504 Self-Ping: Bot uyanik tutuluyor. (Durum: {response.status})")
+        except Exception as e:
+            print(f"[{now_date_text()}] \u26A0\uFE0F Self-Ping hatasi: {e}")
+
 def main():
+    # 1. Web sunucusunu arka planda başlat
     threading.Thread(target=run_health_check_server, daemon=True).start()
+    
+    # 2. Kendi kendini uyandırma (Self-Ping) sistemini arka planda başlat
+    threading.Thread(target=self_ping, daemon=True).start()
 
     state = load_state()
     if state:
@@ -335,3 +350,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+         
