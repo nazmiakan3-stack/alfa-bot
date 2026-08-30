@@ -4,7 +4,6 @@
 import json
 import time
 import os
-import random
 from datetime import datetime, timezone, timedelta
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -19,31 +18,30 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ============================================================
-# MEXC FUTURES API
+# MEXC FUTURES API AYARLARI
 # ============================================================
 MEXC_BASE_URL = "https://contract.mexc.com/api/v1/contract/kline"
 
 # MEXC Futures sembol formatı (Alt çizgi ile)
 SYMBOLS = {
-    "LTC_USDT": "LTC", "BTC_USDT": "BTC",
-    "ETH_USDT": "ETH", "SOL_USDT": "SOL", "BNB_USDT": "BNB",
-    "XRP_USDT": "XRP", "ADA_USDT": "ADA", "AVAX_USDT": "AVAX",
-    "LINK_USDT": "LINK", "DOGE_USDT": "DOGE"
+    "BTC_USDT": "BTC", "ETH_USDT": "ETH", "SOL_USDT": "SOL",
+    "BNB_USDT": "BNB", "AVAX_USDT": "AVAX", "LINK_USDT": "LINK",
+    "XRP_USDT": "XRP", "DOGE_USDT": "DOGE", "ADA_USDT": "ADA", "DOT_USDT": "DOT"
 }
 
 TIMEFRAME = "Min15"  # MEXC 15 dakikalık formatı
-LIMIT = 100
+LIMIT = 250  # EMA 200 hesaplayabilmek için limit
 LOOP_SECONDS = 60
 
-STARTING_BALANCE_PER_COIN = 30.0
-MARGIN_PER_TRADE = 25.0
-LEVERAGE = 10.0
+STARTING_BALANCE_PER_COIN = 50.0
+MARGIN_PER_TRADE = 30.0
+LEVERAGE = 5.0
 POSITION_SIZE = MARGIN_PER_TRADE * LEVERAGE
-TAKE_PROFIT_PCT = 0.02
-STOP_LOSS_PCT = 0.05
+TAKE_PROFIT_PCT = 0.025  # %2.5 Kâr
+STOP_LOSS_PCT = 0.015    # %1.5 Zarar Kes
 COMMISSION_RATE = 0.0004
 
-STATE_FILE = "bot_state.json"
+STATE_FILE = "mexc_alfa_state.json"
 REQUEST_TIMEOUT = 10
 RETRY_COUNT = 3
 TELEGRAM_NOTIFY_INTERVAL = 15 * 60
@@ -80,28 +78,16 @@ def send_telegram_msg(message, parse_mode="HTML"):
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = json.dumps({
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": parse_mode
-    }).encode("utf-8")
-
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0"
-    }
+    payload = json.dumps({"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": parse_mode}).encode("utf-8")
+    headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
 
     req = Request(url, data=payload, headers=headers, method="POST")
-
-    for attempt in range(RETRY_COUNT):
+    for _ in range(RETRY_COUNT):
         try:
             with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
                 return response.status == 200
-        except HTTPError:
+        except:
             time.sleep(1)
-        except Exception:
-            time.sleep(1)
-
     return False
 
 def http_get_json(url, retries=2):
@@ -111,24 +97,21 @@ def http_get_json(url, retries=2):
             req = Request(url, headers=headers)
             with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
                 return json.loads(response.read().decode("utf-8"))
-        except Exception:
-            if attempt < retries - 1:
-                time.sleep(1) 
-            else:
-                return None
+        except:
+            time.sleep(1)
     return None
 
 def get_klines(symbol):
-    # MEXC Futures Klines Endpoint yapısı: /api/v1/contract/kline/{symbol}?interval=...
+    # MEXC Futures kline endpoint yapısı: /api/v1/contract/kline/{symbol}?interval=Min15
     url = f"{MEXC_BASE_URL}/{symbol}?interval={TIMEFRAME}"
     data = http_get_json(url)
     if data and data.get("success") and "data" in data:
         return data["data"]
     return None
 
+# --- TEKNİK GÖSTERGELER ---
 def calc_ema(data, period):
-    if len(data) < period:
-        return []
+    if len(data) < period: return []
     sma = sum(data[:period]) / period
     ema = [sma]
     k = 2 / (period + 1)
@@ -137,21 +120,12 @@ def calc_ema(data, period):
     return ema
 
 def calc_atr(highs, lows, closes, period=20):
-    trs = []
-    for i in range(1, len(closes)):
-        tr = max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1])
-        )
-        trs.append(tr)
-    if len(trs) < period:
-        return 0.0
+    trs = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])) for i in range(1, len(closes))]
+    if len(trs) < period: return 0.0
     return sum(trs[-period:]) / period
 
 def calc_rsi(closes, period=14):
-    if len(closes) <= period:
-        return 50.0
+    if len(closes) <= period: return 50.0
     gains, losses = [], []
     for i in range(1, len(closes)):
         change = closes[i] - closes[i - 1]
@@ -164,86 +138,75 @@ def calc_rsi(closes, period=14):
         avg_gain = ((avg_gain * (period - 1)) + gains[i]) / period
         avg_loss = ((avg_loss * (period - 1)) + losses[i]) / period
 
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    if avg_loss == 0: return 100.0
+    return 100 - (100 / (1 + (avg_gain / avg_loss)))
+
+def calc_vwma(closes, volumes, period):
+    if len(closes) < period: return 0.0
+    cv = sum(c * v for c, v in zip(closes[-period:], volumes[-period:]))
+    v_sum = sum(volumes[-period:])
+    return cv / v_sum if v_sum > 0 else 0.0
 
 def analyze(symbol):
     raw_data = get_klines(symbol)
-    if not raw_data or "close" not in raw_data:
+    if not raw_data or "close" not in raw_data or len(raw_data["close"]) < 205:
         return (symbol, None, None, None, None, None)
 
-    closes = [float(x) for x in raw_data["close"]]
-    highs = [float(x) for x in raw_data["high"]]
-    lows = [float(x) for x in raw_data["low"]]
+    # MEXC dict formatından listelere dönüştürme
+    closes_all = [float(x) for x in raw_data["close"]]
+    highs_all = [float(x) for x in raw_data["high"]]
+    lows_all = [float(x) for x in raw_data["low"]]
+    volumes_all = [float(x) for x in raw_data["vol"]]
 
-    if len(closes) < 50:
-        return (symbol, None, None, None, None, None)
+    # Tamamlanmış geçmiş mumlar (indikatörler için)
+    closed_closes = closes_all[:-1]
+    closed_highs = highs_all[:-1]
+    closed_lows = lows_all[:-1]
+    closed_volumes = volumes_all[:-1]
 
-    # İşlem yapabilmek için son tamamlanmış mumu ve güncel mum verilerini ayırıyoruz
-    closed_closes = closes[:-1]
-    closed_highs = highs[:-1]
-    closed_lows = lows[:-1]
-
-    price = closes[-1]
-    current_high = highs[-1]
-    current_low = lows[-1]
-
-    ema = calc_ema(closed_closes, 20)
+    # En güncel anlık mum değerleri ve fitiller
+    price = closes_all[-1]
+    current_high = highs_all[-1]
+    current_low = lows_all[-1]
+    
+    # Çoklu Doğrulama Hesaplamaları
+    ema200 = calc_ema(closed_closes, 200)
+    ema20 = calc_ema(closed_closes, 20)
     atr = calc_atr(closed_highs, closed_lows, closed_closes, 20)
-
-    if not ema or atr == 0:
-        return (symbol, None, None, None, current_high, current_low)
-
-    kc_lower = ema[-1] - atr * 2
-    kc_upper = ema[-1] + atr * 2
     rsi = calc_rsi(closed_closes, 14)
+    vwma = calc_vwma(closed_closes, closed_volumes, 20)
+
+    if not ema200 or not ema20 or atr == 0:
+        return (symbol, None, price, None, current_high, current_low)
+
+    kc_lower = ema20[-1] - (atr * 1.5)
+    kc_upper = ema20[-1] + (atr * 1.5)
+    trend_ema = ema200[-1]
 
     signal = None
-    if price < kc_lower and rsi <= 25:
+    
+    if price > trend_ema and price < kc_lower and rsi <= 30 and price < vwma:
         signal = "LONG"
-    elif price > kc_upper and rsi >= 75:
+    elif price < trend_ema and price > kc_upper and rsi >= 70 and price > vwma:
         signal = "SHORT"
 
     return (symbol, signal, price, rsi, current_high, current_low)
 
-# --- SUNUCU VE KEEP-ALIVE ---
+# --- SUNUCU VE ANA DÖNGÜ ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_HEAD(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html")
-        self.end_headers()
-
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-type", "text/html")
         self.end_headers()
-        self.wfile.write(b"<html><body><h1>MEXC Bot Aktif ve Calisiyor!</h1></body></html>")
-
-    def log_message(self, format, *args):
-        return
+        self.wfile.write(b"MEXC Alfa Bot Active")
+    def log_message(self, format, *args): return
 
 def run_health_check_server():
     port = int(os.getenv("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
-def self_ping():
-    url = os.getenv("RENDER_EXTERNAL_URL", "https://buraya-render-linkini-yaz.onrender.com")
-    while True:
-        bekleme_suresi = random.randint(600, 720) 
-        time.sleep(bekleme_suresi) 
-        try:
-            req = Request(url, headers={"User-Agent": "MEXCBot-KeepAlive"})
-            with urlopen(req, timeout=10) as response:
-                print(f"[{now_date_text()}] 🔄 Self-Ping atildi. (Durum: {response.status})")
-        except Exception as e:
-            print(f"[{now_date_text()}] ⚠️ Self-Ping hatasi: {e}")
-
 def main():
     threading.Thread(target=run_health_check_server, daemon=True).start()
-    threading.Thread(target=self_ping, daemon=True).start()
 
     state = load_state()
     if state:
@@ -257,8 +220,8 @@ def main():
         realized_pnl = {s: 0.0 for s in SYMBOLS}
         trade_number = 0
 
-    print("MEXC Bot başlatılıyor...")
-    send_telegram_msg(f"🚀 <b>MEXC BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nSistem Render üzerinde aktif.")
+    print("MEXC Alfa Çoklu Doğrulama Sistemi başlatılıyor...")
+    send_telegram_msg(f"👑 <b>MEXC ALFA BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nBorsa: MEXC Futures\nStrateji: Trend+Konum+Hacim+Momentum")
     time.sleep(3) 
 
     last_telegram_time = 0
@@ -269,7 +232,7 @@ def main():
             total_unrealized_pnl = 0.0
             
             lines = []
-            lines.append("🎯 <b>10X SANAL KELTNER RAPORU (MEXC)</b>")
+            lines.append("🛡 <b>MEXC ALFA SANAL TRADE RAPORU</b>")
             lines.append(f"🗓 <b>Tarih:</b> {now_date_text()}")
             lines.append(f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n")
             lines.append("<b>🪙 COIN DURUMLARI</b>")
@@ -285,24 +248,19 @@ def main():
 
                 if current_price is None:
                     lines.append(f"🔸 <b>{name}:</b> N/A")
-                    lines.append(f"└ ⚪️ BOŞ | 💵 {wallet:.2f}$ | 📈 +0.00$")
+                    lines.append(f"└ ⚪️ YÜKLENİYOR | 💵 {wallet:.2f}$ | 📈 +0.00$")
                     continue
 
                 pos = positions.get(symbol)
                 unrealized_pnl = 0.0
                 status_code = "BOŞ"
 
-                # 1. Yeni pozisyon açma kontrolü
                 if pos is None and signal in ("LONG", "SHORT") and wallet >= MARGIN_PER_TRADE:
                     trade_number += 1
-                    if signal == "LONG":
-                        tp = current_price * (1 + TAKE_PROFIT_PCT)
-                        sl = current_price * (1 - STOP_LOSS_PCT)
-                    else:
-                        tp = current_price * (1 - TAKE_PROFIT_PCT)
-                        sl = current_price * (1 + STOP_LOSS_PCT)
+                    tp = current_price * (1 + TAKE_PROFIT_PCT) if signal == "LONG" else current_price * (1 - TAKE_PROFIT_PCT)
+                    sl = current_price * (1 - STOP_LOSS_PCT) if signal == "LONG" else current_price * (1 + STOP_LOSS_PCT)
 
-                    wallet_balances[symbol] = wallet - MARGIN_PER_TRADE
+                    wallet_balances[symbol] -= MARGIN_PER_TRADE
                     positions[symbol] = {
                         "id": trade_number, "side": signal, "entry": current_price,
                         "tp": tp, "sl": sl, "margin": MARGIN_PER_TRADE,
@@ -311,65 +269,58 @@ def main():
                     pos = positions[symbol]
 
                     trade_events.append(
-                        f"🚨 <b>YENİ POZİSYON</b>\n"
+                        f"🚨 <b>MEXC KESKİN NİŞANCI GİRİŞİ!</b>\n"
                         f"Coin: {name} | Yön: {signal}\n"
                         f"Giriş: {current_price:.6f}\n"
                         f"TP: {tp:.6f} | SL: {sl:.6f}"
                     )
 
-                # 2. Açık pozisyon yönetimi ve FİTİL KONTROLÜ
                 if pos is not None:
                     side, entry = pos["side"], float(pos["entry"])
                     
-                    # Fiyat fitillerini kontrol ederek TP veya SL'ye iğne atıp atmadığını yakalıyoruz
+                    # Anlık PNL hesaplama (ekran gösterimi için güncel fiyat)
+                    pct = (current_price - entry) / entry if side == "LONG" else (entry - current_price) / entry
+                    gross_pnl = POSITION_SIZE * pct
+                    unrealized_pnl = gross_pnl - (POSITION_SIZE * COMMISSION_RATE)
+                    total_unrealized_pnl += unrealized_pnl
+
+                    # FİTİL KONTROLÜ (High / Low iğne uçları kontrol ediliyor)
                     hit_tp = False
                     hit_sl = False
-                    
+
                     if side == "LONG":
                         if cur_high >= pos["tp"]:
                             hit_tp = True
                         elif cur_low <= pos["sl"]:
                             hit_sl = True
-                    else: # SHORT
+                    else:  # SHORT
                         if cur_low <= pos["tp"]:
                             hit_tp = True
                         elif cur_high >= pos["sl"]:
                             hit_sl = True
 
-                    # Anlık PNL hesaplaması (görüntü için güncel fiyat baz alınır)
-                    pct = (current_price - entry) / entry if side == "LONG" else (entry - current_price) / entry
-                    gross_pnl = POSITION_SIZE * pct
-                    commission = POSITION_SIZE * COMMISSION_RATE
-                    unrealized_pnl = gross_pnl - commission
-                    total_unrealized_pnl += unrealized_pnl
-
                     if hit_tp or hit_sl:
-                        # Eğer hedefe iğne attıysa, tam hedef fiyatı üzerinden realize edip kapatıyoruz
                         exit_price = pos["tp"] if hit_tp else pos["sl"]
                         exit_pct = (exit_price - entry) / entry if side == "LONG" else (entry - exit_price) / entry
-                        final_pnl = (POSITION_SIZE * exit_pct) - commission
+                        final_pnl = (POSITION_SIZE * exit_pct) - (POSITION_SIZE * COMMISSION_RATE)
 
                         wallet_balances[symbol] += MARGIN_PER_TRADE + final_pnl
-                        realized_pnl[symbol] = realized_pnl.get(symbol, 0.0) + final_pnl
+                        realized_pnl[symbol] += final_pnl
                         positions[symbol] = None
                         status_code = "KAPALI"
-                        res_text = "TAKE PROFIT (Kâr Al)" if hit_tp else "STOP LOSS (Zarar Kes)"
+                        res_text = "🎯 TAKE PROFIT" if hit_tp else "🛑 STOP LOSS"
 
                         trade_events.append(
                             f"✅ <b>POZİSYON KAPANDI</b>\n"
                             f"Coin: {name} | Sonuç: {res_text}\n"
                             f"P/L: {final_pnl:+.2f} USDT\n"
-                            f"Yeni Cüzdan: {wallet_balances[symbol]:.2f} USDT"
+                            f"Kasa: {wallet_balances[symbol]:.2f} USDT"
                         )
                     else:
-                        status_code = "LONG" if side == "LONG" else "SHORT"
+                        status_code = side
 
                 display_wallet = wallet_balances[symbol] + (MARGIN_PER_TRADE + unrealized_pnl if positions.get(symbol) else 0)
-                
-                if status_code == "BOŞ": status_emoji = "⚪️ BOŞ"
-                elif status_code == "LONG": status_emoji = "🟢 LONG"
-                elif status_code == "SHORT": status_emoji = "🔴 SHORT"
-                elif status_code == "KAPALI": status_emoji = "✅ KAP"
+                status_emoji = {"BOŞ": "⚪️ BOŞ", "LONG": "🟢 LONG", "SHORT": "🔴 SHORT", "KAPALI": "✅ KAP"}[status_code]
                 
                 lines.append(f"🔸 <b>{name}:</b> {current_price}")
                 lines.append(f"└ {status_emoji} | 💵 {display_wallet:.2f}$ | 📈 {unrealized_pnl:+.2f}$")
@@ -379,7 +330,7 @@ def main():
             total_equity = total_cash + sum(float(p["margin"]) for p in positions.values() if p) + total_unrealized_pnl
             pnl_pct = (total_unrealized_pnl / total_equity * 100) if total_equity > 0 else 0.0
 
-            lines.append("\n<b>📊 GENEL ÖZET</b>")
+            lines.append("\n<b>📊 MEXC ALFA GENEL ÖZET</b>")
             lines.append(f"💵 <b>Toplam Varlık:</b> {total_equity:.2f} USDT")
             lines.append(f"📈 <b>Açık K/Z:</b> {total_unrealized_pnl:+.2f} USDT (<b>%{pnl_pct:+.2f}</b>)")
             lines.append(f"💰 <b>Realize K/Z:</b> {total_realized:+.2f} USDT")
@@ -387,12 +338,11 @@ def main():
             output_text = "\n".join(lines)
             print("\n" + output_text.replace('<b>', '').replace('</b>', ''))
 
-            for event in trade_events:
-                send_telegram_msg(event)
+            for event in trade_events: send_telegram_msg(event)
 
             now_ts = time.time()
             if now_ts - last_telegram_time >= TELEGRAM_NOTIFY_INTERVAL:
-                send_telegram_msg(output_text)
+                send_telegram_msg(output_text) 
                 last_telegram_time = now_ts
 
             save_state(positions, wallet_balances, realized_pnl, trade_number)
