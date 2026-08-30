@@ -17,31 +17,24 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ============================================================
-# ALFA BOT & ÇOKLU KAYNAK AYARLARI
+# ALFA BOT & MEXC VERİ KAYNAĞI AYARLARI
 # ============================================================
-BASE_URLS = [
-    "https://fapi.binance.com/fapi/v1/klines",
-    "https://fapi1.binance.com/fapi/v1/klines",
-    "https://fapi2.binance.com/fapi/v1/klines"
-]
-
 SYMBOLS = {
-    "XAUUSDT": "XAU", "XAGUSDT": "XAG", "BTCUSDT": "BTC", 
-    "ETHUSDT": "ETH", "SOLUSDT": "SOL", "BNBUSDT": "BNB", 
-    "XRPUSDT": "XRP", "ADAUSDT": "ADA", "AVAXUSDT": "AVAX", 
-    "LINKUSDT": "LINK", "DOGEUSDT": "DOGE"
+    "BTCUSDT": "BTC", "ETHUSDT": "ETH", "SOLUSDT": "SOL",
+    "BNBUSDT": "BNB", "AVAXUSDT": "AVAX", "LINKUSDT": "LINK",
+    "XRPUSDT": "XRP", "DOGEUSDT": "DOGE", "ADAUSDT": "ADA", "DOTUSDT": "DOT"
 }
 
 TIMEFRAME = "15m"
 LIMIT = 250  
 LOOP_SECONDS = 60
 
-STARTING_BALANCE_PER_COIN = 30.0
-MARGIN_PER_TRADE = 25.0
-LEVERAGE = 10.0
+STARTING_BALANCE_PER_COIN = 50.0
+MARGIN_PER_TRADE = 30.0
+LEVERAGE = 5.0
 POSITION_SIZE = MARGIN_PER_TRADE * LEVERAGE
-TAKE_PROFIT_PCT = 0.02   # %2 Kâr
-STOP_LOSS_PCT = 0.05     # %5 Zarar Kes
+TAKE_PROFIT_PCT = 0.025  # %2.5 Kâr
+STOP_LOSS_PCT = 0.015    # %1.5 Zarar Kes
 COMMISSION_RATE = 0.0004
 
 STATE_FILE = "alfa_state.json"
@@ -104,16 +97,8 @@ def http_get_json(url, retries=2):
             time.sleep(1)
     return None
 
-# --- ÇİFT YEDEKLİ AKILLI VERİ ÇEKME FONKSİYONU ---
+# --- DİREKT MEXC ODAKLI VERİ ÇEKME FONKSİYONU ---
 def get_klines(symbol):
-    # 1. Aşama: Binance Alternatif URL'leri denenir
-    for base_url in BASE_URLS:
-        url = f"{base_url}?symbol={symbol}&interval={TIMEFRAME}&limit={LIMIT}"
-        data = http_get_json(url)
-        if data and isinstance(data, list) and len(data) > 0:
-            return data
-
-    # 2. Aşama: Binance'den yanıt alınamazsa MEXC API yedek olarak devreye girer
     try:
         mexc_symbol = symbol.replace("USDT", "_USDT")
         mexc_url = f"https://api.mexc.com/api/v3/klines?symbol={mexc_symbol}&interval={TIMEFRAME}&limit={LIMIT}"
@@ -121,7 +106,7 @@ def get_klines(symbol):
         if data and isinstance(data, list) and len(data) > 0:
             formatted_data = []
             for row in data:
-                # MEXC kline formatını Binance formatıyla eşleştiriyoruz
+                # MEXC formatını standart yapıya uyarlıyoruz
                 formatted_data.append([
                     row[0], row[1], row[2], row[3], row[4], row[5]
                 ])
@@ -231,8 +216,8 @@ def main():
         realized_pnl = {s: 0.0 for s in SYMBOLS}
         trade_number = 0
 
-    print("Alfa Çoklu Doğrulama Sistemi başlatılıyor...")
-    send_telegram_msg(f"👑 <b>ALFA BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nStrateji: Çift Yedekli Veri Havuzu Aktif")
+    print("Alfa MEXC Veri Sistemi başlatılıyor...")
+    send_telegram_msg(f"👑 <b>ALFA BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nStrateji: MEXC Veri Kaynağı Aktif")
     time.sleep(3) 
 
     last_telegram_time = 0
@@ -243,7 +228,7 @@ def main():
             total_unrealized_pnl = 0.0
             
             lines = []
-            lines.append("🛡 <b>ALFA SANAL TRADE RAPORU</b>")
+            lines.append("🛡 <b>ALFA SANAL TRADE RAPORU (MEXC)</b>")
             lines.append(f"🗓 <b>Tarih:</b> {now_date_text()}")
             lines.append(f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n")
             lines.append("<b>🪙 COIN DURUMLARI</b>")
