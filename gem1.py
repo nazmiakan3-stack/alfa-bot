@@ -9,6 +9,7 @@ Dosya: alfa_coklu_dogrulama_mexc_bot.py
 import json
 import time
 import os
+import random
 from datetime import datetime, timezone, timedelta
 from urllib.request import Request, urlopen
 from concurrent.futures import ThreadPoolExecutor
@@ -220,8 +221,23 @@ def run_health_check_server():
     server.serve_forever()
 
 
+def self_ping():
+    # Kendi Render URL'ini buraya yaz (Alfa servisinin adresi)
+    url = "https://BURAYA_ALFA_RENDER_LINKINI_YAZ.onrender.com"
+    while True:
+        bekleme_suresi = random.randint(600, 720)
+        time.sleep(bekleme_suresi)
+        try:
+            req = Request(url, headers={"User-Agent": "AlfaMEXC-KeepAlive"})
+            with urlopen(req, timeout=10) as response:
+                print(f"[{now_date_text()}] Self-Ping OK ({response.status})")
+        except Exception as e:
+            print(f"[{now_date_text()}] Self-Ping hatasi: {e}")
+
+
 def main():
     threading.Thread(target=run_health_check_server, daemon=True).start()
+    threading.Thread(target=self_ping, daemon=True).start()
 
     state = load_state()
     if state:
