@@ -27,6 +27,7 @@ BASE_URLS = [
 ]
 
 TICKER_PRICE_URL = "https://fapi.binance.com/fapi/v1/ticker/price"
+BYBIT_PRICE_URL = "https://api.bybit.com/v5/market/tickers?category=linear"
 
 SYMBOLS = {
     "BTCUSDT": "BTC", "ETHUSDT": "ETH", "SOLUSDT": "SOL",
@@ -107,10 +108,29 @@ def http_get_json(url, retries=2):
     return None
 
 def get_all_prices():
-    """Tüm coinlerin anlık fiyatını tek bir HTTP isteğiyle toplu çeker (N/A sorununu önler)"""
+    """Önce Binance'den dener, engel yerse Bybit yedek API'sine geçerek N/A sorununu tamamen çözer."""
+    # 1. Deneme: Binance Ticker Price
     data = http_get_json(TICKER_PRICE_URL)
     if data and isinstance(data, list):
-        return {item["symbol"]: float(item["price"]) for item in data}
+        prices = {}
+        for item in data:
+            if "symbol" in item and "price" in item:
+                prices[item["symbol"]] = float(item["price"])
+        if prices:
+            return prices
+
+    # 2. Deneme (Yedek): Bybit Linear Tickers API
+    bybit_data = http_get_json(BYBIT_PRICE_URL)
+    if bybit_data and "result" in bybit_data:
+        prices = {}
+        for item in bybit_data["result"].get("list", []):
+            symbol = item.get("symbol")
+            price = item.get("lastPrice")
+            if symbol and price:
+                prices[symbol] = float(price)
+        if prices:
+            return prices
+
     return {}
 
 def get_klines(symbol):
@@ -251,7 +271,7 @@ def main():
             trade_events = []
             total_unrealized_pnl = 0.0
             
-            # 1. Tüm fiyatları tek seferde toplu çekiyoruz
+            # 1. Tüm fiyatları toplu çekiyoruz (Binance + Bybit Yedekli)
             all_prices = get_all_prices()
 
             lines = []
@@ -354,7 +374,7 @@ def main():
             time.sleep(LOOP_SECONDS)
 
         except KeyboardInterrupt:
-            print("\nBot kapatılıyor...")
+            print("\nBotu kapattın...")
             save_state(positions, wallet_balances, realized_pnl, trade_number)
             break
         except Exception as e:
