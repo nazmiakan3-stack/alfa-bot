@@ -26,6 +26,8 @@ BASE_URLS = [
     "https://fapi2.binance.com/fapi/v1/klines"
 ]
 
+TICKER_PRICE_URL = "https://fapi.binance.com/fapi/v1/ticker/price"
+
 SYMBOLS = {
     "BTCUSDT": "BTC", "ETHUSDT": "ETH", "SOLUSDT": "SOL",
     "BNBUSDT": "BNB", "AVAXUSDT": "AVAX", "LINKUSDT": "LINK",
@@ -104,6 +106,13 @@ def http_get_json(url, retries=2):
             time.sleep(1)
     return None
 
+def get_all_prices():
+    """Tüm coinlerin anlık fiyatını tek bir HTTP isteğiyle toplu çeker (N/A sorununu önler)"""
+    data = http_get_json(TICKER_PRICE_URL)
+    if data and isinstance(data, list):
+        return {item["symbol"]: float(item["price"]) for item in data}
+    return {}
+
 def get_klines(symbol):
     for base_url in BASE_URLS:
         url = f"{base_url}?symbol={symbol}&interval={TIMEFRAME}&limit={LIMIT}"
@@ -149,18 +158,18 @@ def calc_vwma(closes, volumes, period):
     v_sum = sum(volumes[-period:])
     return cv / v_sum if v_sum > 0 else 0.0
 
-def analyze(symbol):
+def analyze(symbol, all_prices):
     data = get_klines(symbol)
-    if not data or len(data) < 205:
-        return (symbol, None, None, None)
+    current_price = all_prices.get(symbol)
+
+    if not data or len(data) < 205 or current_price is None:
+        return (symbol, None, current_price, None)
 
     closed = data[:-1]
     closes = [float(row[4]) for row in closed]
     highs = [float(row[2]) for row in closed]
     lows = [float(row[3]) for row in closed]
     volumes = [float(row[5]) for row in closed]
-
-    price = closes[-1]
     
     ema200 = calc_ema(closes, 200)
     ema20 = calc_ema(closes, 20)
@@ -169,20 +178,19 @@ def analyze(symbol):
     vwma = calc_vwma(closes, volumes, 20)
 
     if not ema200 or not ema20 or atr == 0:
-        return (symbol, None, price, None)
+        return (symbol, None, current_price, None)
 
     kc_lower = ema20[-1] - (atr * 1.5)
     kc_upper = ema20[-1] + (atr * 1.5)
     trend_ema = ema200[-1]
 
     signal = None
-    
-    if price > trend_ema and price < kc_lower and rsi <= 30 and price < vwma:
+    if current_price > trend_ema and current_price < kc_lower and rsi <= 30 and current_price < vwma:
         signal = "LONG"
-    elif price < trend_ema and price > kc_upper and rsi >= 70 and price > vwma:
+    elif current_price < trend_ema and current_price > kc_upper and rsi >= 70 and current_price > vwma:
         signal = "SHORT"
 
-    return (symbol, signal, price, rsi)
+    return (symbol, signal, current_price, rsi)
 
 # --- SUNUCU, ANA DÖNGÜ VE KENDİ KENDİNİ UYANDIRMA SİSTEMİ ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -206,23 +214,18 @@ def run_health_check_server():
     server.serve_forever()
 
 def self_ping():
-    # Render'daki URL'ni buraya yazdık. 
     url = "https://alfa-bot-pj2b.onrender.com"
     while True:
-        time.sleep(600)  # 10 dakikada bir çalışır (600 saniye)
+        time.sleep(600)  
         try:
             req = Request(url, headers={"User-Agent": "AlfaBot-KeepAlive"})
-            # self_ping de HEAD isteği atabilir, ancak basit bir GET isteği de sorun olmaz.
             with urlopen(req, timeout=10) as response:
-                print(f"[{now_date_text()}] \U0001F504 Self-Ping: Bot uyanik tutuluyor. (Durum: {response.status})")
+                print(f"[{now_date_text()}] 🔄 Self-Ping: Bot uyanik tutuluyor. (Durum: {response.status})")
         except Exception as e:
-            print(f"[{now_date_text()}] \u26A0\uFE0F Self-Ping hatasi: {e}")
+            print(f"[{now_date_text()}] ⚠️ Self-Ping hatasi: {e}")
 
 def main():
-    # 1. Web sunucusunu arka planda başlat
     threading.Thread(target=run_health_check_server, daemon=True).start()
-    
-    # 2. Kendi kendini uyandırma (Self-Ping) sistemini arka planda başlat
     threading.Thread(target=self_ping, daemon=True).start()
 
     state = load_state()
@@ -248,6 +251,9 @@ def main():
             trade_events = []
             total_unrealized_pnl = 0.0
             
+            # 1. Tüm fiyatları tek seferde toplu çekiyoruz
+            all_prices = get_all_prices()
+
             lines = []
             lines.append("🛡 <b>ALFA SANAL TRADE RAPORU</b>")
             lines.append(f"🗓 <b>Tarih:</b> {now_date_text()}")
@@ -255,7 +261,7 @@ def main():
             lines.append("<b>🪙 COIN DURUMLARI</b>")
 
             with ThreadPoolExecutor(max_workers=5) as executor:
-                results = list(executor.map(analyze, SYMBOLS.keys()))
+                results = list(executor.map(lambda s: analyze(s, all_prices), SYMBOLS.keys()))
 
             analysis_dict = {r[0]: r[1:] for r in results}
 
