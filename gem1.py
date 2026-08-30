@@ -97,7 +97,7 @@ def http_get_json(url, retries=2):
             time.sleep(1)
     return None
 
-# --- DİREKT MEXC ODAKLI VERİ ÇEKME FONKSİYONU ---
+# --- MEXC ODAKLI ESNEK VERİ ÇEKME FONKSİYONU ---
 def get_klines(symbol):
     try:
         mexc_symbol = symbol.replace("USDT", "_USDT")
@@ -106,17 +106,16 @@ def get_klines(symbol):
         if data and isinstance(data, list) and len(data) > 0:
             formatted_data = []
             for row in data:
-                # MEXC formatını standart yapıya uyarlıyoruz
                 formatted_data.append([
                     row[0], row[1], row[2], row[3], row[4], row[5]
                 ])
             return formatted_data
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"MEXC veri hatası ({symbol}): {e}")
 
     return None
 
-# --- TEKNİK GÖSTERGELER ---
+# --- TEKNİK GÖSTERGELER (DİNAMİK UZUNLUK) ---
 def calc_ema(data, period):
     if len(data) < period: return []
     sma = sum(data[:period]) / period
@@ -156,7 +155,7 @@ def calc_vwma(closes, volumes, period):
 
 def analyze(symbol):
     data = get_klines(symbol)
-    if not data or len(data) < 205:
+    if not data or len(data) < 30:  # Sınır esnetildi, veri akışı kesilmeyecek
         return (symbol, None, None, None)
 
     closed = data[:-1]
@@ -167,18 +166,22 @@ def analyze(symbol):
 
     price = closes[-1]
     
-    ema200 = calc_ema(closes, 200)
-    ema20 = calc_ema(closes, 20)
-    atr = calc_atr(highs, lows, closes, 20)
+    # Dinamik EMA ve gösterge hesaplama (veri miktarına göre otomatik uyarlanır)
+    p_len = len(closes)
+    ema200 = calc_ema(closes, min(200, p_len))
+    ema20 = calc_ema(closes, min(20, p_len))
+    atr = calc_atr(highs, lows, closes, min(20, p_len - 1))
     rsi = calc_rsi(closes, 14)
-    vwma = calc_vwma(closes, volumes, 20)
+    vwma = calc_vwma(closes, volumes, min(20, p_len))
 
-    if not ema200 or not ema20 or atr == 0:
+    if not ema20 or atr == 0:
         return (symbol, None, price, None)
+
+    # Eğer 200 EMA henüz dolmadıysa kısa vadeliyi baz alır
+    trend_ema = ema200[-1] if ema200 else ema20[-1]
 
     kc_lower = ema20[-1] - (atr * 1.5)
     kc_upper = ema20[-1] + (atr * 1.5)
-    trend_ema = ema200[-1]
 
     signal = None
     if price > trend_ema and price < kc_lower and rsi <= 30 and price < vwma:
@@ -217,7 +220,7 @@ def main():
         trade_number = 0
 
     print("Alfa MEXC Veri Sistemi başlatılıyor...")
-    send_telegram_msg(f"👑 <b>ALFA BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nStrateji: MEXC Veri Kaynağı Aktif")
+    send_telegram_msg(f"👑 <b>ALFA BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nStrateji: MEXC Dinamik Veri Akışı Aktif")
     time.sleep(3) 
 
     last_telegram_time = 0
