@@ -6,7 +6,6 @@ import time
 import os
 from datetime import datetime, timezone, timedelta
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError
 from concurrent.futures import ThreadPoolExecutor
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
@@ -18,7 +17,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ============================================================
-# ALFA BOT AYARLARI
+# ALFA BOT & ÇOKLU KAYNAK AYARLARI
 # ============================================================
 BASE_URLS = [
     "https://fapi.binance.com/fapi/v1/klines",
@@ -33,15 +32,15 @@ SYMBOLS = {
 }
 
 TIMEFRAME = "15m"
-LIMIT = 250
+LIMIT = 250  
 LOOP_SECONDS = 60
 
 STARTING_BALANCE_PER_COIN = 50.0
 MARGIN_PER_TRADE = 30.0
 LEVERAGE = 5.0
 POSITION_SIZE = MARGIN_PER_TRADE * LEVERAGE
-TAKE_PROFIT_PCT = 0.025
-STOP_LOSS_PCT = 0.015
+TAKE_PROFIT_PCT = 0.025  # %2.5 Kâr
+STOP_LOSS_PCT = 0.015    # %1.5 Zarar Kes
 COMMISSION_RATE = 0.0004
 
 STATE_FILE = "alfa_state.json"
@@ -104,43 +103,34 @@ def http_get_json(url, retries=2):
             time.sleep(1)
     return None
 
-def get_all_prices():
-    """Coingecko API üzerinden IP engeline takılmadan toplu fiyat çeker."""
-    url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,binancecoin,avalanche-2,chainlink,ripple,dogecoin,cardano,polkadot&vs_currencies=usd"
-    data = http_get_json(url)
-    
-    if data and isinstance(data, dict):
-        mapping = {
-            "bitcoin": "BTCUSDT",
-            "ethereum": "ETHUSDT",
-            "solana": "SOLUSDT",
-            "binancecoin": "BNBUSDT",
-            "avalanche-2": "AVAXUSDT",
-            "chainlink": "LINKUSDT",
-            "ripple": "XRPUSDT",
-            "dogecoin": "DOGEUSDT",
-            "cardano": "ADAUSDT",
-            "polkadot": "DOTUSDT"
-        }
-        
-        prices = {}
-        for cg_id, symbol in mapping.items():
-            if cg_id in data and "usd" in data[cg_id]:
-                prices[symbol] = float(data[cg_id]["usd"])
-        
-        if prices:
-            return prices
-
-    return {}
-
+# --- ÇİFT YEDEKLİ AKILLI VERİ ÇEKME FONKSİYONU ---
 def get_klines(symbol):
+    # 1. Aşama: Binance Alternatif URL'leri denenir
     for base_url in BASE_URLS:
         url = f"{base_url}?symbol={symbol}&interval={TIMEFRAME}&limit={LIMIT}"
         data = http_get_json(url)
         if data and isinstance(data, list) and len(data) > 0:
             return data
+
+    # 2. Aşama: Binance'den yanıt alınamazsa MEXC API yedek olarak devreye girer
+    try:
+        mexc_symbol = symbol.replace("USDT", "_USDT")
+        mexc_url = f"https://api.mexc.com/api/v3/klines?symbol={mexc_symbol}&interval={TIMEFRAME}&limit={LIMIT}"
+        data = http_get_json(mexc_url)
+        if data and isinstance(data, list) and len(data) > 0:
+            formatted_data = []
+            for row in data:
+                # MEXC kline formatını Binance formatıyla eşleştiriyoruz
+                formatted_data.append([
+                    row[0], row[1], row[2], row[3], row[4], row[5]
+                ])
+            return formatted_data
+    except Exception:
+        pass
+
     return None
 
+# --- TEKNİK GÖSTERGELER ---
 def calc_ema(data, period):
     if len(data) < period: return []
     sma = sum(data[:period]) / period
@@ -178,18 +168,18 @@ def calc_vwma(closes, volumes, period):
     v_sum = sum(volumes[-period:])
     return cv / v_sum if v_sum > 0 else 0.0
 
-def analyze(symbol, all_prices):
+def analyze(symbol):
     data = get_klines(symbol)
-    current_price = all_prices.get(symbol)
-
-    if not data or len(data) < 205 or current_price is None:
-        return (symbol, None, current_price, None)
+    if not data or len(data) < 205:
+        return (symbol, None, None, None)
 
     closed = data[:-1]
     closes = [float(row[4]) for row in closed]
     highs = [float(row[2]) for row in closed]
     lows = [float(row[3]) for row in closed]
     volumes = [float(row[5]) for row in closed]
+
+    price = closes[-1]
     
     ema200 = calc_ema(closes, 200)
     ema20 = calc_ema(closes, 20)
@@ -198,55 +188,35 @@ def analyze(symbol, all_prices):
     vwma = calc_vwma(closes, volumes, 20)
 
     if not ema200 or not ema20 or atr == 0:
-        return (symbol, None, current_price, None)
+        return (symbol, None, price, None)
 
     kc_lower = ema20[-1] - (atr * 1.5)
     kc_upper = ema20[-1] + (atr * 1.5)
     trend_ema = ema200[-1]
 
     signal = None
-    if current_price > trend_ema and current_price < kc_lower and rsi <= 30 and current_price < vwma:
+    if price > trend_ema and price < kc_lower and rsi <= 30 and price < vwma:
         signal = "LONG"
-    elif current_price < trend_ema and current_price > kc_upper and rsi >= 70 and current_price > vwma:
+    elif price < trend_ema and price > kc_upper and rsi >= 70 and price > vwma:
         signal = "SHORT"
 
-    return (symbol, signal, current_price, rsi)
+    return (symbol, signal, price, rsi)
 
-# --- SUNUCU, ANA DÖNGÜ VE KENDİ KENDİNİ UYANDIRMA SİSTEMİ ---
+# --- SUNUCU VE ANA DÖNGÜ ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_HEAD(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html")
-        self.end_headers()
-
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-type", "text/html")
         self.end_headers()
-        self.wfile.write(b"<html><body><h1>Alfa Bot Aktif ve Calisiyor!</h1></body></html>")
-        
-    def log_message(self, format, *args): 
-        return
+        self.wfile.write(b"Alfa Bot Active")
+    def log_message(self, format, *args): return
 
 def run_health_check_server():
     port = int(os.getenv("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
-def self_ping():
-    url = "https://alfa-bot-pj2b.onrender.com"
-    while True:
-        time.sleep(600)  
-        try:
-            req = Request(url, headers={"User-Agent": "AlfaBot-KeepAlive"})
-            with urlopen(req, timeout=10) as response:
-                print(f"[{now_date_text()}] 🔄 Self-Ping: Bot uyanik tutuluyor. (Durum: {response.status})")
-        except Exception as e:
-            print(f"[{now_date_text()}] ⚠️ Self-Ping hatasi: {e}")
-
 def main():
     threading.Thread(target=run_health_check_server, daemon=True).start()
-    threading.Thread(target=self_ping, daemon=True).start()
 
     state = load_state()
     if state:
@@ -260,8 +230,8 @@ def main():
         realized_pnl = {s: 0.0 for s in SYMBOLS}
         trade_number = 0
 
-    print("Alfa Çoklu Doğrulama Sistemi başlatılıyor (CoinGecko API)...")
-    send_telegram_msg(f"👑 <b>ALFA BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nStrateji: Trend+Konum+Hacim+Momentum")
+    print("Alfa Çoklu Doğrulama Sistemi başlatılıyor...")
+    send_telegram_msg(f"👑 <b>ALFA BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nStrateji: Çift Yedekli Veri Havuzu Aktif")
     time.sleep(3) 
 
     last_telegram_time = 0
@@ -271,9 +241,6 @@ def main():
             trade_events = []
             total_unrealized_pnl = 0.0
             
-            # 1. Tüm fiyatları CoinGecko üzerinden IP engeli olmadan çekiyoruz
-            all_prices = get_all_prices()
-
             lines = []
             lines.append("🛡 <b>ALFA SANAL TRADE RAPORU</b>")
             lines.append(f"🗓 <b>Tarih:</b> {now_date_text()}")
@@ -281,7 +248,7 @@ def main():
             lines.append("<b>🪙 COIN DURUMLARI</b>")
 
             with ThreadPoolExecutor(max_workers=5) as executor:
-                results = list(executor.map(lambda s: analyze(s, all_prices), SYMBOLS.keys()))
+                results = list(executor.map(analyze, SYMBOLS.keys()))
 
             analysis_dict = {r[0]: r[1:] for r in results}
 
@@ -374,7 +341,7 @@ def main():
             time.sleep(LOOP_SECONDS)
 
         except KeyboardInterrupt:
-            print("\nBot kapatılıyor...")
+            print("\nBotu kapatılıyor...")
             save_state(positions, wallet_balances, realized_pnl, trade_number)
             break
         except Exception as e:
