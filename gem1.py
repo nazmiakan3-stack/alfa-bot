@@ -26,21 +26,22 @@ BASE_URLS = [
 ]
 
 SYMBOLS = {
-    "BTCUSDT": "BTC", "ETHUSDT": "ETH", "SOLUSDT": "SOL",
-    "BNBUSDT": "BNB", "AVAXUSDT": "AVAX", "LINKUSDT": "LINK",
-    "XRPUSDT": "XRP", "DOGEUSDT": "DOGE", "ADAUSDT": "ADA", "DOTUSDT": "DOT"
+    "XAUUSDT": "XAU", "XAGUSDT": "XAG", "BTCUSDT": "BTC", 
+    "ETHUSDT": "ETH", "SOLUSDT": "SOL", "BNBUSDT": "BNB", 
+    "XRPUSDT": "XRP", "ADAUSDT": "ADA", "AVAXUSDT": "AVAX", 
+    "LINKUSDT": "LINK", "DOGEUSDT": "DOGE"
 }
 
 TIMEFRAME = "15m"
 LIMIT = 250  
 LOOP_SECONDS = 60
 
-STARTING_BALANCE_PER_COIN = 50.0
-MARGIN_PER_TRADE = 30.0
-LEVERAGE = 5.0
+STARTING_BALANCE_PER_COIN = 30.0
+MARGIN_PER_TRADE = 25.0
+LEVERAGE = 10.0
 POSITION_SIZE = MARGIN_PER_TRADE * LEVERAGE
-TAKE_PROFIT_PCT = 0.025  # %2.5 Kâr
-STOP_LOSS_PCT = 0.015    # %1.5 Zarar Kes
+TAKE_PROFIT_PCT = 0.02   # %2 Kâr
+STOP_LOSS_PCT = 0.05     # %5 Zarar Kes
 COMMISSION_RATE = 0.0004
 
 STATE_FILE = "alfa_state.json"
@@ -341,7 +342,7 @@ def main():
             time.sleep(LOOP_SECONDS)
 
         except KeyboardInterrupt:
-            print("\nBotu kapatılıyor...")
+            print("\nBot kapatılıyor...")
             save_state(positions, wallet_balances, realized_pnl, trade_number)
             break
         except Exception as e:
