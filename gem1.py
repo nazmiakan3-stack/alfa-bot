@@ -37,8 +37,11 @@ STARTING_BALANCE_PER_COIN = 50.0
 MARGIN_PER_TRADE = 30.0
 LEVERAGE = 5.0
 POSITION_SIZE = MARGIN_PER_TRADE * LEVERAGE
-TAKE_PROFIT_PCT = 0.025  # %2.5 Kâr
-STOP_LOSS_PCT = 0.015    # %1.5 Zarar Kes
+
+# İZLEYEN STOP AYARLARI
+TAKE_PROFIT_PCT = 1.00   # %100 (Etkisiz eleman yapıyoruz ki İzleyen Stop çalışsın)
+STOP_LOSS_PCT = 0.015    # %1.5 İlk Zarar Kes
+TRAILING_STOP_PCT = 0.015 # Zirveden %1.5 düştüğünde kârı alıp işlemi kapat
 COMMISSION_RATE = 0.0004
 
 STATE_FILE = "mexc_alfa_state.json"
@@ -130,7 +133,6 @@ def calc_vwma(closes, volumes, period):
     v_sum = sum(volumes[-period:])
     return cv / v_sum if v_sum > 0 else 0.0
 
-# Yeni Eklenen: Stochastic RSI
 def calc_stoch_rsi(closes, period=14, stoch_period=14, k_period=3, d_period=3):
     if len(closes) <= period: 
         return None, None
@@ -139,7 +141,6 @@ def calc_stoch_rsi(closes, period=14, stoch_period=14, k_period=3, d_period=3):
     gains = []
     losses = []
     
-    # İlk RSI değerini hesaplama
     for i in range(1, period + 1):
         change = closes[i] - closes[i - 1]
         gains.append(max(change, 0))
@@ -154,7 +155,6 @@ def calc_stoch_rsi(closes, period=14, stoch_period=14, k_period=3, d_period=3):
         rs = avg_gain / avg_loss
         rsi_series.append(100.0 - (100.0 / (1.0 + rs)))
 
-    # Kalan RSI serisini Wilder Yumuşatması (Smoothed Moving Average) ile hesaplama
     for i in range(period + 1, len(closes)):
         change = closes[i] - closes[i - 1]
         gain = max(change, 0)
@@ -172,7 +172,6 @@ def calc_stoch_rsi(closes, period=14, stoch_period=14, k_period=3, d_period=3):
     if len(rsi_series) < stoch_period:
         return None, None
 
-    # StochRSI hesaplama: (RSI - Min) / (Max - Min) * 100
     stoch_rsi = []
     for i in range(stoch_period - 1, len(rsi_series)):
         window = rsi_series[i - stoch_period + 1 : i + 1]
@@ -186,7 +185,6 @@ def calc_stoch_rsi(closes, period=14, stoch_period=14, k_period=3, d_period=3):
     if len(stoch_rsi) < k_period: 
         return None, None
     
-    # %K Serisi (StochRSI'nin Basit Hareketli Ortalaması)
     k_series = []
     for i in range(k_period - 1, len(stoch_rsi)):
         k_val = sum(stoch_rsi[i - k_period + 1 : i + 1]) / k_period
@@ -195,13 +193,11 @@ def calc_stoch_rsi(closes, period=14, stoch_period=14, k_period=3, d_period=3):
     if len(k_series) < d_period: 
         return None, None
 
-    # %D Serisi (%K'nın Basit Hareketli Ortalaması)
     d_series = []
     for i in range(d_period - 1, len(k_series)):
         d_val = sum(k_series[i - d_period + 1 : i + 1]) / d_period
         d_series.append(d_val)
 
-    # Son iki mumu (önceki ve şimdiki) kesişimleri kontrol etmek için döndür
     return k_series[-2:], d_series[-2:]
 
 def analyze(symbol):
@@ -209,30 +205,25 @@ def analyze(symbol):
     if not raw_data or "close" not in raw_data or len(raw_data["close"]) < 205:
         return (symbol, None, None, None, None, None)
 
-    # MEXC dict formatından listelere dönüştürme
     closes_all = [float(x) for x in raw_data["close"]]
     highs_all = [float(x) for x in raw_data["high"]]
     lows_all = [float(x) for x in raw_data["low"]]
     volumes_all = [float(x) for x in raw_data["vol"]]
 
-    # Tamamlanmış geçmiş mumlar (indikatörler için)
     closed_closes = closes_all[:-1]
     closed_highs = highs_all[:-1]
     closed_lows = lows_all[:-1]
     closed_volumes = volumes_all[:-1]
 
-    # En güncel anlık mum değerleri ve fitiller
     price = closes_all[-1]
     current_high = highs_all[-1]
     current_low = lows_all[-1]
     
-    # ORİJİNAL ÇOKLU DOĞRULAMA HESAPLAMALARI (RSI Hariç)
     ema200 = calc_ema(closed_closes, 200)
     ema20 = calc_ema(closed_closes, 20)
     atr = calc_atr(closed_highs, closed_lows, closed_closes, 20)
     vwma = calc_vwma(closed_closes, closed_volumes, 20)
     
-    # YENİ EKLENEN: Stochastic RSI
     k_last2, d_last2 = calc_stoch_rsi(closed_closes, period=14, stoch_period=14, k_period=3, d_period=3)
 
     if not ema200 or not ema20 or atr == 0 or not k_last2 or not d_last2:
@@ -247,19 +238,9 @@ def analyze(symbol):
 
     signal = None
     
-    # LONG SİNYALİ: 
-    # 1. Fiyat EMA200'ün üstünde (Trend yukarı)
-    # 2. Fiyat Keltner Alt Bandının altında (Ani düşüş/Sarkma)
-    # 3. Fiyat VWMA'nın altında 
-    # 4. StochRSI aşırı satım bölgesinde (<20) K, D'yi YUKARI kestiğinde.
     if price > trend_ema and price < kc_lower and price < vwma and (prev_k <= prev_d and curr_k > curr_d and curr_k < 20):
         signal = "LONG"
         
-    # SHORT SİNYALİ: 
-    # 1. Fiyat EMA200'ün altında (Trend aşağı)
-    # 2. Fiyat Keltner Üst Bandının üstünde (Ani yükseliş/Sarkma)
-    # 3. Fiyat VWMA'nın üstünde 
-    # 4. StochRSI aşırı alım bölgesinde (>80) K, D'yi AŞAĞI kestiğinde.
     elif price < trend_ema and price > kc_upper and price > vwma and (prev_k >= prev_d and curr_k < curr_d and curr_k > 80):
         signal = "SHORT"
 
@@ -293,8 +274,8 @@ def main():
         realized_pnl = {s: 0.0 for s in SYMBOLS}
         trade_number = 0
 
-    print("MEXC Alfa Çoklu Doğrulama Sistemi (StochRSI'lı) başlatılıyor...")
-    send_telegram_msg(f"👑 <b>MEXC ALFA BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nBorsa: MEXC Futures\nStrateji: Trend+Konum+Hacim+StochRSI Kesişimi")
+    print("MEXC Alfa Çoklu Doğrulama Sistemi (İzleyen Stop'lu) başlatılıyor...")
+    send_telegram_msg(f"👑 <b>MEXC ALFA BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nBorsa: MEXC Futures\nStrateji: Trend+Konum+Hacim+StochRSI + İZLEYEN STOP")
     time.sleep(3) 
 
     last_telegram_time = 0
@@ -337,7 +318,9 @@ def main():
                     positions[symbol] = {
                         "id": trade_number, "side": signal, "entry": current_price,
                         "tp": tp, "sl": sl, "margin": MARGIN_PER_TRADE,
-                        "leverage": LEVERAGE, "position_size": POSITION_SIZE
+                        "leverage": LEVERAGE, "position_size": POSITION_SIZE,
+                        "highest_price": current_price, # İzleyen stop için eklendi
+                        "lowest_price": current_price   # İzleyen stop için eklendi
                     }
                     pos = positions[symbol]
 
@@ -345,43 +328,59 @@ def main():
                         f"🚨 <b>MEXC KESKİN NİŞANCI GİRİŞİ!</b>\n"
                         f"Coin: {name} | Yön: {signal}\n"
                         f"Giriş: {current_price:.6f}\n"
-                        f"TP: {tp:.6f} | SL: {sl:.6f}"
+                        f"İzleyen Stop: %{TRAILING_STOP_PCT*100}"
                     )
 
                 if pos is not None:
                     side, entry = pos["side"], float(pos["entry"])
                     
-                    # Anlık PNL hesaplama (ekran gösterimi için güncel fiyat)
+                    # 1. Zirve ve Dip Fiyatları Güncelle (İzleyen Stop İçin)
+                    if "highest_price" not in pos: pos["highest_price"] = entry # Eski veriler hata vermesin diye
+                    if "lowest_price" not in pos: pos["lowest_price"] = entry
+
+                    pos["highest_price"] = max(pos["highest_price"], cur_high)
+                    pos["lowest_price"] = min(pos["lowest_price"], cur_low)
+
+                    # 2. Dinamik SL (İzleyen Stop) Hesapla
+                    if side == "LONG":
+                        trailing_sl = pos["highest_price"] * (1 - TRAILING_STOP_PCT)
+                        pos["sl"] = max(pos["sl"], trailing_sl) # SL'yi sadece yukarı taşı
+                    else: # SHORT
+                        trailing_sl = pos["lowest_price"] * (1 + TRAILING_STOP_PCT)
+                        pos["sl"] = min(pos["sl"], trailing_sl) # SL'yi sadece aşağı taşı
+
+                    # Anlık PNL hesaplama
                     pct = (current_price - entry) / entry if side == "LONG" else (entry - current_price) / entry
                     gross_pnl = POSITION_SIZE * pct
                     unrealized_pnl = gross_pnl - (POSITION_SIZE * COMMISSION_RATE)
                     total_unrealized_pnl += unrealized_pnl
 
-                    # FİTİL KONTROLÜ (High / Low iğne uçları kontrol ediliyor)
-                    hit_tp = False
+                    # 3. FİTİL KONTROLÜ (Sadece SL tetiklenmesi beklenir)
                     hit_sl = False
 
                     if side == "LONG":
-                        if cur_high >= pos["tp"]:
-                            hit_tp = True
-                        elif cur_low <= pos["sl"]:
+                        if cur_low <= pos["sl"]:
                             hit_sl = True
                     else:  # SHORT
-                        if cur_low <= pos["tp"]:
-                            hit_tp = True
-                        elif cur_high >= pos["sl"]:
+                        if cur_high >= pos["sl"]:
                             hit_sl = True
 
-                    if hit_tp or hit_sl:
-                        exit_price = pos["tp"] if hit_tp else pos["sl"]
+                    if hit_sl:
+                        exit_price = pos["sl"]
                         exit_pct = (exit_price - entry) / entry if side == "LONG" else (entry - exit_price) / entry
                         final_pnl = (POSITION_SIZE * exit_pct) - (POSITION_SIZE * COMMISSION_RATE)
 
                         wallet_balances[symbol] += MARGIN_PER_TRADE + final_pnl
                         realized_pnl[symbol] += final_pnl
                         positions[symbol] = None
-                        status_code = "KAPALI"
-                        res_text = "🎯 TAKE PROFIT" if hit_tp else "🛑 STOP LOSS"
+                        
+                        # Bildirim için sonucun Kâr mı Zarar mı olduğunu tespit et
+                        if final_pnl > 0:
+                            status_code = "KAPALI"
+                            res_text = "🎯 İZLEYEN STOP (KÂR ALINDI)"
+                        else:
+                            status_code = "KAPALI"
+                            res_text = "🛑 ZARAR KES (STOP LOSS)"
 
                         trade_events.append(
                             f"✅ <b>POZİSYON KAPANDI</b>\n"
