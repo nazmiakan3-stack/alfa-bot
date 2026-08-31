@@ -124,28 +124,85 @@ def calc_atr(highs, lows, closes, period=20):
     if len(trs) < period: return 0.0
     return sum(trs[-period:]) / period
 
-def calc_rsi(closes, period=14):
-    if len(closes) <= period: return 50.0
-    gains, losses = [], []
-    for i in range(1, len(closes)):
-        change = closes[i] - closes[i - 1]
-        gains.append(max(change, 0))
-        losses.append(abs(min(change, 0)))
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-
-    for i in range(period, len(gains)):
-        avg_gain = ((avg_gain * (period - 1)) + gains[i]) / period
-        avg_loss = ((avg_loss * (period - 1)) + losses[i]) / period
-
-    if avg_loss == 0: return 100.0
-    return 100 - (100 / (1 + (avg_gain / avg_loss)))
-
 def calc_vwma(closes, volumes, period):
     if len(closes) < period: return 0.0
     cv = sum(c * v for c, v in zip(closes[-period:], volumes[-period:]))
     v_sum = sum(volumes[-period:])
     return cv / v_sum if v_sum > 0 else 0.0
+
+# Yeni Eklenen: Stochastic RSI
+def calc_stoch_rsi(closes, period=14, stoch_period=14, k_period=3, d_period=3):
+    if len(closes) <= period: 
+        return None, None
+    
+    rsi_series = []
+    gains = []
+    losses = []
+    
+    # İlk RSI değerini hesaplama
+    for i in range(1, period + 1):
+        change = closes[i] - closes[i - 1]
+        gains.append(max(change, 0))
+        losses.append(abs(min(change, 0)))
+
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+
+    if avg_loss == 0:
+        rsi_series.append(100.0)
+    else:
+        rs = avg_gain / avg_loss
+        rsi_series.append(100.0 - (100.0 / (1.0 + rs)))
+
+    # Kalan RSI serisini Wilder Yumuşatması (Smoothed Moving Average) ile hesaplama
+    for i in range(period + 1, len(closes)):
+        change = closes[i] - closes[i - 1]
+        gain = max(change, 0)
+        loss = abs(min(change, 0))
+        
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+        
+        if avg_loss == 0:
+            rsi_series.append(100.0)
+        else:
+            rs = avg_gain / avg_loss
+            rsi_series.append(100.0 - (100.0 / (1.0 + rs)))
+
+    if len(rsi_series) < stoch_period:
+        return None, None
+
+    # StochRSI hesaplama: (RSI - Min) / (Max - Min) * 100
+    stoch_rsi = []
+    for i in range(stoch_period - 1, len(rsi_series)):
+        window = rsi_series[i - stoch_period + 1 : i + 1]
+        low_rsi = min(window)
+        high_rsi = max(window)
+        if high_rsi == low_rsi:
+            stoch_rsi.append(0.0)
+        else:
+            stoch_rsi.append(100 * (window[-1] - low_rsi) / (high_rsi - low_rsi))
+
+    if len(stoch_rsi) < k_period: 
+        return None, None
+    
+    # %K Serisi (StochRSI'nin Basit Hareketli Ortalaması)
+    k_series = []
+    for i in range(k_period - 1, len(stoch_rsi)):
+        k_val = sum(stoch_rsi[i - k_period + 1 : i + 1]) / k_period
+        k_series.append(k_val)
+
+    if len(k_series) < d_period: 
+        return None, None
+
+    # %D Serisi (%K'nın Basit Hareketli Ortalaması)
+    d_series = []
+    for i in range(d_period - 1, len(k_series)):
+        d_val = sum(k_series[i - d_period + 1 : i + 1]) / d_period
+        d_series.append(d_val)
+
+    # Son iki mumu (önceki ve şimdiki) kesişimleri kontrol etmek için döndür
+    return k_series[-2:], d_series[-2:]
 
 def analyze(symbol):
     raw_data = get_klines(symbol)
@@ -169,28 +226,44 @@ def analyze(symbol):
     current_high = highs_all[-1]
     current_low = lows_all[-1]
     
-    # Çoklu Doğrulama Hesaplamaları
+    # ORİJİNAL ÇOKLU DOĞRULAMA HESAPLAMALARI (RSI Hariç)
     ema200 = calc_ema(closed_closes, 200)
     ema20 = calc_ema(closed_closes, 20)
     atr = calc_atr(closed_highs, closed_lows, closed_closes, 20)
-    rsi = calc_rsi(closed_closes, 14)
     vwma = calc_vwma(closed_closes, closed_volumes, 20)
+    
+    # YENİ EKLENEN: Stochastic RSI
+    k_last2, d_last2 = calc_stoch_rsi(closed_closes, period=14, stoch_period=14, k_period=3, d_period=3)
 
-    if not ema200 or not ema20 or atr == 0:
+    if not ema200 or not ema20 or atr == 0 or not k_last2 or not d_last2:
         return (symbol, None, price, None, current_high, current_low)
 
     kc_lower = ema20[-1] - (atr * 1.5)
     kc_upper = ema20[-1] + (atr * 1.5)
     trend_ema = ema200[-1]
 
+    prev_k, curr_k = k_last2
+    prev_d, curr_d = d_last2
+
     signal = None
     
-    if price > trend_ema and price < kc_lower and rsi <= 30 and price < vwma:
+    # LONG SİNYALİ: 
+    # 1. Fiyat EMA200'ün üstünde (Trend yukarı)
+    # 2. Fiyat Keltner Alt Bandının altında (Ani düşüş/Sarkma)
+    # 3. Fiyat VWMA'nın altında 
+    # 4. StochRSI aşırı satım bölgesinde (<20) K, D'yi YUKARI kestiğinde.
+    if price > trend_ema and price < kc_lower and price < vwma and (prev_k <= prev_d and curr_k > curr_d and curr_k < 20):
         signal = "LONG"
-    elif price < trend_ema and price > kc_upper and rsi >= 70 and price > vwma:
+        
+    # SHORT SİNYALİ: 
+    # 1. Fiyat EMA200'ün altında (Trend aşağı)
+    # 2. Fiyat Keltner Üst Bandının üstünde (Ani yükseliş/Sarkma)
+    # 3. Fiyat VWMA'nın üstünde 
+    # 4. StochRSI aşırı alım bölgesinde (>80) K, D'yi AŞAĞI kestiğinde.
+    elif price < trend_ema and price > kc_upper and price > vwma and (prev_k >= prev_d and curr_k < curr_d and curr_k > 80):
         signal = "SHORT"
 
-    return (symbol, signal, price, rsi, current_high, current_low)
+    return (symbol, signal, price, curr_k, current_high, current_low)
 
 # --- SUNUCU VE ANA DÖNGÜ ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -220,8 +293,8 @@ def main():
         realized_pnl = {s: 0.0 for s in SYMBOLS}
         trade_number = 0
 
-    print("MEXC Alfa Çoklu Doğrulama Sistemi başlatılıyor...")
-    send_telegram_msg(f"👑 <b>MEXC ALFA BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nBorsa: MEXC Futures\nStrateji: Trend+Konum+Hacim+Momentum")
+    print("MEXC Alfa Çoklu Doğrulama Sistemi (StochRSI'lı) başlatılıyor...")
+    send_telegram_msg(f"👑 <b>MEXC ALFA BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nBorsa: MEXC Futures\nStrateji: Trend+Konum+Hacim+StochRSI Kesişimi")
     time.sleep(3) 
 
     last_telegram_time = 0
@@ -243,7 +316,7 @@ def main():
             analysis_dict = {r[0]: r[1:] for r in results}
 
             for symbol, name in SYMBOLS.items():
-                signal, current_price, rsi, cur_high, cur_low = analysis_dict.get(symbol, (None, None, None, None, None))
+                signal, current_price, stoch_k, cur_high, cur_low = analysis_dict.get(symbol, (None, None, None, None, None))
                 wallet = wallet_balances.get(symbol, STARTING_BALANCE_PER_COIN)
 
                 if current_price is None:
