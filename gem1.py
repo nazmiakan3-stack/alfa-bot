@@ -1,41 +1,79 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import json
 import os
-import threading
+import sys
 import time
-from urllib.request import Request, urlopen
+import json
+import logging
+import threading
+from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import requests
+import ccxt
+import pandas as pd
+import numpy as np
 
 # ============================================================
-# TELEGRAM BİLGİLERİ (Render Environment Variables)
+# 0. RENDER & UPTIMEROBOT İÇİN DAHİLİ HTTP SUNUCUSU
 # ============================================================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"SMC Trading Bot is alive and running!")
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+    def log_message(self, format, *args):
+        return
+
+def start_health_check_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    server.serve_forever()
+
+# Arka planda web sunucusunu başlat (Render uyku modunu engeller)
+threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ============================================================
-# MEXC FUTURES API AYARLARI
+# LOGGING VE KONFİGÜRASYON
 # ============================================================
-MEXC_BASE_URL = "https://contract.mexc.com/api/v1/contract/kline"
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 
+TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN", "BURAYA_BOT_TOKENINI_YAZ")
+TELEGRAM_CHAT_ID = os.getenv("CHAT_ID", "BURAYA_CHAT_ID_YAZ")
+SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "13.5"))
+DB_FILE = os.getenv("DB_FILE", "trades_db.json")
+
+# ============================================================
+# 15 ADET SEÇİLEN COİN LİSTESİ (Alt Alta Sıralı)
+# ============================================================
 SYMBOLS = {
-    "BTC_USDT": "BTC",
-    "ETH_USDT": "ETH",
-    "SOL_USDT": "SOL",
-    "BNB_USDT": "BNB",
-    "AVAX_USDT": "AVAX",
-    "LINK_USDT": "LINK",
-    "XRP_USDT": "XRP",
-    "DOGE_USDT": "DOGE",
-    "ADA_USDT": "ADA",
-    "DOT_USDT": "DOT",
+    "BTC/USDT": "BTC",
+    "ETH/USDT": "ETH",
+    "SOL/USDT": "SOL",
+    "BNB/USDT": "BNB",
+    "XRP/USDT": "XRP",
+    "ADA/USDT": "ADA",
+    "DOGE/USDT": "DOGE",
+    "AVAX/USDT": "AVAX",
+    "LINK/USDT": "LINK",
+    "DOT/USDT": "DOT",
+    "NEAR/USDT": "NEAR",
+    "MATIC/USDT": "MATIC",
+    "ARB/USDT": "ARB",
+    "SUI/USDT": "SUI",
+    "FTM/USDT": "FTM",
 }
 
-TIMEFRAME = "Min15"
-LIMIT = 250
+TIMEFRAME = "1h"
+LIMIT = 150
 LOOP_SECONDS = 60
 
 STARTING_BALANCE_PER_COIN = 50.0
@@ -43,21 +81,142 @@ MARGIN_PER_TRADE = 30.0
 LEVERAGE = 5.0
 POSITION_SIZE = MARGIN_PER_TRADE * LEVERAGE
 
-# PRO OPTİMİZE EDİLMİŞ STOP VE KÂR AYARLARI
-TAKE_PROFIT_PCT = 0.035      # %3.5 Sabit Kâr Al Hedefi
-STOP_LOSS_PCT = 0.025        # %2.5 Zarar Kes (Gürültüden korur)
-TRAILING_STOP_PCT = 0.025    # Zirveden %2.5 geri çekilmede kârı kilitle
+TAKE_PROFIT_PCT = 0.035
+STOP_LOSS_PCT = 0.025
 COMMISSION_RATE = 0.0004
-
-STATE_FILE = "mexc_alfa_state.json"
-REQUEST_TIMEOUT = 10
-RETRY_COUNT = 3
-TELEGRAM_NOTIFY_INTERVAL = 15 * 60
 TURKEY_TZ = timezone(timedelta(hours=3))
 
 def now_date_text():
     return datetime.now(TURKEY_TZ).strftime("%d.%m.%Y %H:%M:%S")
 
+def send_telegram_msg(message):
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "BURAYA_BOT_TOKENINI_YAZ":
+        print(f"\n[TELEGRAM MESAJI]:\n{message}\n")
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
+    try:
+        res = requests.post(url, json=payload, timeout=10)
+        return res.status_code == 200
+    except Exception as e:
+        print(f"Telegram Gönderim Hatası: {e}")
+        return False
+
+# ============================================================
+# CCXT BORSASI VERİ ÇEKME
+# ============================================================
+exchange = ccxt.binance({
+    'enableRateLimit': True,
+    'options': {'defaultType': 'future'}
+})
+
+def get_klines_df(symbol, timeframe=TIMEFRAME, limit=LIMIT):
+    try:
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        if not ohlcv:
+            return None
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        return df
+    except Exception as e:
+        print(f"Veri çekme hatası ({symbol}): {e}")
+        return None
+
+# ============================================================
+# SMC & MTF SKORLAMA MOTORU (Kaynak Kod Standartlarında)
+# ============================================================
+def calculate_smc_analysis(df, symbol):
+    if df is None or len(df) < 50:
+        return None, 0..0, 0.0, 0.0
+
+    closes = df["close"].values
+    highs = df["high"].values
+    lows = df["low"].values
+    volumes = df["volume"].values
+
+    price = closes[-1]
+    
+    # Teknik İndikatörler
+    ma50 = pd.Series(closes).rolling(50).mean().iloc[-1]
+    ma100 = pd.Series(closes).rolling(min(100, len(closes))).mean().iloc[-1]
+    ma200 = pd.Series(closes).rolling(min(200, len(closes))).mean().iloc[-1]
+    
+    # RSI Hesaplama
+    delta = pd.Series(closes).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    current_rsi = rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50.0
+
+    # SMC / Price Action Simülasyon Koşulları (Proxy & Yapısal Tespiti)
+    info = {
+        "sellside_sweep": lows[-1] <= np.min(lows[-10:-1]),
+        "buyside_sweep": highs[-1] >= np.max(highs[-10:-1]),
+        "bullish_ob": closes[-1] > closes[-2] and volumes[-1] > np.mean(volumes[-10:]),
+        "bearish_ob": closes[-1] < closes[-2] and volumes[-1] > np.mean(volumes[-10:]),
+        "bullish_bos": closes[-1] > np.max(highs[-15:-1]),
+        "bearish_bos": closes[-1] < np.min(lows[-15:-1]),
+        "bullish_fvg": (highs[-2] < lows[-1]),
+        "bearish_fvg": (lows[-2] > highs[-1]),
+        "above_ma50": price > ma50,
+        "above_ma100": price > ma100,
+        "above_ma200": price > ma200,
+        "rsi": current_rsi
+    }
+
+    skor_l, skor_s = 0.0, 0.0
+
+    # Skorlama mantığı (Notebook Kaynaklarından Alınmıştır)[span_2](start_span)[span_2](end_span)
+    if info.get("sellside_sweep"): skor_l += 1.57
+    if info.get("buyside_sweep"): skor_s += 1.57
+
+    if info.get("bullish_ob"): skor_l += 1.57
+    if info.get("bearish_ob"): skor_s += 1.57
+
+    if info.get("bullish_bos"): skor_l += 1.80; skor_l += 1.35  # BOS + CHoCH proxy
+    if info.get("bearish_bos"): skor_s += 1.80; skor_s += 1.35
+
+    if info.get("bullish_fvg"): skor_l += 1.35; skor_l += 1.35  # FVG + SFP proxy
+    if info.get("bearish_fvg"): skor_s += 1.35; skor_s += 1.35
+
+    if info.get("above_ma50"): 
+        skor_l += 1.12 + 0.90
+    else: 
+        skor_s += 1.12 + 0.90
+
+    if info.get("above_ma100"): skor_l += 0.90
+    else: skor_s += 0.90
+
+    if info.get("above_ma200"): skor_l += 1.35
+    else: skor_s += 1.35
+
+    if current_rsi > 50: skor_l += 1.12
+    else: skor_s += 1.12
+
+    # Karar Mekanizması
+    if skor_l >= skor_s and skor_l >= SCORE_THRESHOLD:
+        return "LONG", price, current_rsi, skor_l
+    elif skor_s > skor_l and skor_s >= SCORE_THRESHOLD:
+        return "SHORT", price, current_rsi, skor_s
+    
+    return "BOŞ", price, current_rsi, max(skor_l, skor_s)
+
+def analyze(symbol_tuple):
+    symbol, name = symbol_tuple
+    df = get_klines_df(symbol)
+    if df is None:
+        return symbol, None, None, 0.0, 0.0
+    signal, price, rsi, score = calculate_smc_analysis(df, symbol)
+    return symbol, signal, price, rsi, score
+
+# ============================================================
+# PERSISTENCE (STATE MANAGEMENT)
+# ============================================================
 def save_state(positions, wallet_balances, realized_pnl, trade_number):
     state = {
         "positions": positions,
@@ -67,230 +226,24 @@ def save_state(positions, wallet_balances, realized_pnl, trade_number):
         "last_save": now_date_text(),
     }
     try:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
+        with open(DB_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, ensure_ascii=False)
     except Exception as e:
         print(f"Durum kaydedilemedi: {e}")
 
 def load_state():
-    if not os.path.exists(STATE_FILE):
+    if not os.path.exists(DB_FILE):
         return None
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+        with open(DB_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
 
-def send_telegram_msg(message, parse_mode="HTML"):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return False
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = json.dumps({
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": parse_mode,
-    }).encode("utf-8")
-    headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
-
-    req = Request(url, data=payload, headers=headers, method="POST")
-    for _ in range(RETRY_COUNT):
-        try:
-            with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
-                return response.status == 200
-        except:
-            time.sleep(1)
-    return False
-
-def http_get_json(url, retries=2):
-    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-    for attempt in range(retries):
-        try:
-            req = Request(url, headers=headers)
-            with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except:
-            time.sleep(1)
-    return None
-
-def get_klines(symbol):
-    url = f"{MEXC_BASE_URL}/{symbol}?interval={TIMEFRAME}"
-    data = http_get_json(url)
-    if data and data.get("success") and "data" in data:
-        return data["data"]
-    return None
-
-# --- TEKNİK GÖSTERGELER ---
-def calc_ema(data, period):
-    if len(data) < period:
-        return []
-    sma = sum(data[:period]) / period
-    ema = [sma]
-    k = 2 / (period + 1)
-    for price in data[period:]:
-        ema.append(price * k + ema[-1] * (1 - k))
-    return ema
-
-def calc_atr(highs, lows, closes, period=20):
-    trs = [
-        max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
-        for i in range(1, len(closes))
-    ]
-    if len(trs) < period:
-        return 0.0
-    return sum(trs[-period:]) / period
-
-def calc_vwma(closes, volumes, period):
-    if len(closes) < period:
-        return 0.0
-    cv = sum(c * v for c, v in zip(closes[-period:], volumes[-period:]))
-    v_sum = sum(volumes[-period:])
-    return cv / v_sum if v_sum > 0 else 0.0
-
-def calc_stoch_rsi(closes, period=14, stoch_period=14, k_period=3, d_period=3):
-    if len(closes) <= period:
-        return None, None
-
-    rsi_series = []
-    gains, losses = [], []
-
-    for i in range(1, period + 1):
-        change = closes[i] - closes[i - 1]
-        gains.append(max(change, 0))
-        losses.append(abs(min(change, 0)))
-
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period
-
-    if avg_loss == 0:
-        rsi_series.append(100.0)
-    else:
-        rs = avg_gain / avg_loss
-        rsi_series.append(100.0 - (100.0 / (1.0 + rs)))
-
-    for i in range(period + 1, len(closes)):
-        change = closes[i] - closes[i - 1]
-        gain = max(change, 0)
-        loss = abs(min(change, 0))
-
-        avg_gain = (avg_gain * (period - 1) + gain) / period
-        avg_loss = (avg_loss * (period - 1) + loss) / period
-
-        if avg_loss == 0:
-            rsi_series.append(100.0)
-        else:
-            rs = avg_gain / avg_loss
-            rsi_series.append(100.0 - (100.0 / (1.0 + rs)))
-
-    if len(rsi_series) < stoch_period:
-        return None, None
-
-    stoch_rsi = []
-    for i in range(stoch_period - 1, len(rsi_series)):
-        window = rsi_series[i - stoch_period + 1 : i + 1]
-        low_rsi = min(window)
-        high_rsi = max(window)
-        if high_rsi == low_rsi:
-            stoch_rsi.append(0.0)
-        else:
-            stoch_rsi.append(100 * (window[-1] - low_rsi) / (high_rsi - low_rsi))
-
-    if len(stoch_rsi) < k_period:
-        return None, None
-
-    k_series = []
-    for i in range(k_period - 1, len(stoch_rsi)):
-        k_val = sum(stoch_rsi[i - k_period + 1 : i + 1]) / k_period
-        k_series.append(k_val)
-
-    if len(k_series) < d_period:
-        return None, None
-
-    d_series = []
-    for i in range(d_period - 1, len(k_series)):
-        d_val = sum(k_series[i - d_period + 1 : i + 1]) / d_period
-        d_series.append(d_val)
-
-    return k_series[-2:], d_series[-2:]
-
-def analyze(symbol):
-    raw_data = get_klines(symbol)
-    if not raw_data or "close" not in raw_data or len(raw_data["close"]) < 205:
-        return (symbol, None, None, None, None, None)
-
-    closes_all = [float(x) for x in raw_data["close"]]
-    highs_all = [float(x) for x in raw_data["high"]]
-    lows_all = [float(x) for x in raw_data["low"]]
-    volumes_all = [float(x) for x in raw_data["vol"]]
-
-    closed_closes = closes_all[:-1]
-    closed_highs = highs_all[:-1]
-    closed_lows = lows_all[:-1]
-    closed_volumes = volumes_all[:-1]
-
-    price = closes_all[-1]
-    current_high = highs_all[-1]
-    current_low = lows_all[-1]
-
-    ema200 = calc_ema(closed_closes, 200)
-    ema20 = calc_ema(closed_closes, 20)
-    atr = calc_atr(closed_highs, closed_lows, closed_closes, 20)
-    vwma = calc_vwma(closed_closes, closed_volumes, 20)
-
-    k_last2, d_last2 = calc_stoch_rsi(closed_closes)
-
-    if not ema200 or not ema20 or atr == 0 or not k_last2 or not d_last2:
-        return (symbol, None, price, None, current_high, current_low)
-
-    kc_lower = ema20[-1] - (atr * 1.5)
-    kc_upper = ema20[-1] + (atr * 1.5)
-    trend_ema = ema200[-1]
-
-    prev_k, curr_k = k_last2
-    prev_d, curr_d = d_last2
-
-    signal = None
-
-    if (
-        price > trend_ema
-        and price < kc_lower
-        and price < vwma
-        and (prev_k <= prev_d and curr_k > curr_d and curr_k < 20)
-    ):
-        signal = "LONG"
-
-    elif (
-        price < trend_ema
-        and price > kc_upper
-        and price > vwma
-        and (prev_k >= prev_d and curr_k < curr_d and curr_k > 80)
-    ):
-        signal = "SHORT"
-
-    return (symbol, signal, price, curr_k, current_high, current_low)
-
-# --- SUNUCU VE ANA DÖNGÜ ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"MEXC Pro Alfa Bot Active")
-
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-
-    def log_message(self, format, *args):
-        return
-
-def run_health_check_server():
-    port = int(os.getenv("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    server.serve_forever()
-
+# ============================================================
+# ANA DÖNGÜ VE RAPORLAMA
+# ============================================================
 def main():
-    threading.Thread(target=run_health_check_server, daemon=True).start()
-
     state = load_state()
     if state:
         positions = state.get("positions", {s: None for s in SYMBOLS})
@@ -303,44 +256,57 @@ def main():
         realized_pnl = {s: 0.0 for s in SYMBOLS}
         trade_number = 0
 
-    print("MEXC Pro Alfa Akıllı Takip Sistemi başlatılıyor...")
-    send_telegram_msg(
-        f"👑 <b>MEXC PRO ALFA BOT AKTİF!</b>\nTarih: {now_date_text()}\n"
-        f"Strateji: Gelişmiş Filtreleme + Optimize Edilmiş Stop (%{STOP_LOSS_PCT*100})"
-    )
-    time.sleep(3)
+    print("SMC & Price Action 15 Coin Bot Başlatılıyor...")
 
-    last_telegram_time = 0
+    # İLK ÇALIŞTIRILDIĞINDA ANINDA LİSTEYİ VE RAPORU GÖNDER
+    initial_lines = [
+        "🛡 <b>SMC & PRICE ACTION BAŞLANGIÇ RAPORU</b>",
+        f"🗓 <b>Tarih:</b> {now_date_text()}",
+        f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n",
+        "🪙 <b>15 COİN DURUMLARI (ALT ALTA SIRALI)</b>"
+    ]
+
+    for symbol, name in SYMBOLS.items():
+        initial_lines.append(f"🔸 <b>{name}:</b> N/A | ⚪️ BOŞ | 💵 50.00$ | 📈 +0.00$")
+
+    initial_lines.append("\n📊 <b>GENEL PORTFÖY ÖZETİ</b>")
+    initial_lines.append(f"💵 <b>Toplam Varlık:</b> {len(SYMBOLS)*50.0:.2f} USDT")
+    initial_lines.append("📈 <b>Açık K/Z:</b> +0.00 USDT (%+0.00)")
+    initial_lines.append(f"💰 <b>Realize K/Z:</b> +0.00 USDT")
+
+    send_telegram_msg("\n".join(initial_lines))
 
     while True:
         try:
             trade_events = []
             total_unrealized_pnl = 0.0
-
-            lines = []
-            lines.append("🛡 <b>MEXC PRO ALFA TRADE RAPORU</b>")
-            lines.append(f"🗓 <b>Tarih:</b> {now_date_text()}")
-            lines.append(f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n")
-            lines.append("<b>🪙 COIN DURUMLARI</b>")
+            position_activity_detected = False
 
             with ThreadPoolExecutor(max_workers=5) as executor:
-                results = list(executor.map(analyze, SYMBOLS.keys()))
+                results = list(executor.map(analyze, SYMBOLS.items()))
 
             analysis_dict = {r[0]: r[1:] for r in results}
 
+            lines = [
+                "🛡 <b>SMC & PRICE ACTION GÜNCEL RAPORU</b>",
+                f"🗓 <b>Tarih:</b> {now_date_text()}",
+                f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n",
+                "🪙 <b>15 COİN DURUMLARI (ALT ALTA SIRALI)</b>"
+            ]
+
             for symbol, name in SYMBOLS.items():
-                signal, current_price, stoch_k, cur_high, cur_low = analysis_dict.get(symbol, (None, None, None, None, None))
+                signal, current_price, rsi, score = analysis_dict.get(symbol, (None, None, None, 0.0))
                 wallet = wallet_balances.get(symbol, STARTING_BALANCE_PER_COIN)
 
                 if current_price is None:
-                    lines.append(f"🔸 <b>{name}:</b> N/A")
-                    lines.append(f"└ ⚪️ YÜKLENİYOR | 💵 {wallet:.2f}$ | 📈 +0.00$")
+                    lines.append(f"🔸 <b>{name}:</b> N/A | ⚪️ BOŞ | 💵 {wallet:.2f}$ | 📈 +0.00$")
                     continue
 
                 pos = positions.get(symbol)
                 unrealized_pnl = 0.0
                 status_code = "BOŞ"
 
+                # POZİSYON AÇMA KONTROLÜ (SMC Sinyali ile)
                 if pos is None and signal in ("LONG", "SHORT") and wallet >= MARGIN_PER_TRADE:
                     trade_number += 1
                     tp = current_price * (1 + TAKE_PROFIT_PCT) if signal == "LONG" else current_price * (1 - TAKE_PROFIT_PCT)
@@ -355,111 +321,69 @@ def main():
                         "sl": sl,
                         "margin": MARGIN_PER_TRADE,
                         "leverage": LEVERAGE,
-                        "position_size": POSITION_SIZE,
-                        "highest_price": current_price,
-                        "lowest_price": current_price,
+                        "position_size": POSITION_SIZE
                     }
                     pos = positions[symbol]
+                    position_activity_detected = True
 
                     trade_events.append(
-                        "🚨 <b>PRO NİŞANCI GİRİŞİ!</b>\n"
-                        f"Coin: {name} | Yön: {signal}\n"
-                        f"Giriş: {current_price:.6f}\n"
-                        f"Hedef (TP): %{TAKE_PROFIT_PCT*100} | Stop: %{STOP_LOSS_PCT*100}"
+                        f"🚨 <b>SMC NİŞANCI GİRİŞİ ({name})!</b>\n"
+                        f"Yön: {signal} | Skor: {score:.1f}/20\n"
+                        f"Giriş Fiyatı: {current_price:.4f}\n"
+                        f"Hedef (TP): {tp:.4f} | Stop (SL): {sl:.4f}"
                     )
 
+                # AÇIK POZİSYONLARI YÖNET
                 if pos is not None:
                     side, entry = pos["side"], float(pos["entry"])
-
-                    if "highest_price" not in pos:
-                        pos["highest_price"] = entry
-                    if "lowest_price" not in pos:
-                        pos["lowest_price"] = entry
-
-                    pos["highest_price"] = max(pos["highest_price"], cur_high)
-                    pos["lowest_price"] = min(pos["lowest_price"], cur_low)
-
-                    if side == "LONG":
-                        trailing_sl = pos["highest_price"] * (1 - TRAILING_STOP_PCT)
-                        pos["sl"] = max(pos["sl"], trailing_sl)
-                    else:
-                        trailing_sl = pos["lowest_price"] * (1 + TRAILING_STOP_PCT)
-                        pos["sl"] = min(pos["sl"], trailing_sl)
-
                     pct = (current_price - entry) / entry if side == "LONG" else (entry - current_price) / entry
                     gross_pnl = POSITION_SIZE * pct
                     unrealized_pnl = gross_pnl - (POSITION_SIZE * COMMISSION_RATE)
                     total_unrealized_pnl += unrealized_pnl
 
-                    hit_exit = False
-                    exit_reason = ""
+                    hit_tp = (side == "LONG" and current_price >= pos["tp"]) or (side == "SHORT" and current_price <= pos["tp"])
+                    hit_sl = (side == "LONG" and current_price <= pos["sl"]) or (side == "SHORT" and current_price >= pos["sl"])
 
-                    if side == "LONG":
-                        if cur_high >= pos["tp"]:
-                            hit_exit = True
-                            exit_reason = "🎯 HEDEF ALINDI (TP)"
-                        elif cur_low <= pos["sl"]:
-                            hit_exit = True
-                            exit_reason = "🛡 STOP / İZLEYEN STOP"
-                    else:
-                        if cur_low <= pos["tp"]:
-                            hit_exit = True
-                            exit_reason = "🎯 HEDEF ALINDI (TP)"
-                        elif cur_high >= pos["sl"]:
-                            hit_exit = True
-                            exit_reason = "🛡 STOP / İZLEYEN STOP"
-
-                    if hit_exit:
-                        # TP mi SL mi vurduğunu netleştirmek için fiyata bakalım
-                        exit_price = pos["tp"] if "HEDEF" in exit_reason else pos["sl"]
-                        exit_pct = (exit_price - entry) / entry if side == "LONG" else (entry - exit_price) / entry
-                        final_pnl = (POSITION_SIZE * exit_pct) - (POSITION_SIZE * COMMISSION_RATE)
-
-                        wallet_balances[symbol] += MARGIN_PER_TRADE + final_pnl
-                        realized_pnl[symbol] += final_pnl
+                    if hit_tp or hit_sl:
+                        exit_pnl = unrealized_pnl
+                        wallet_balances[symbol] += MARGIN_PER_TRADE + exit_pnl
+                        realized_pnl[symbol] = realized_pnl.get(symbol, 0.0) + exit_pnl
                         positions[symbol] = None
+                        position_activity_detected = True
 
-                        res_text = "🎯 KÂR İLE KAPANDI" if final_pnl > 0 else "🛑 ZARARLA KAPANDI"
-
+                        res_text = "🎯 TAKE PROFIT" if hit_tp else "🛑 STOP LOSS"
                         trade_events.append(
-                            f"✅ <b>İŞLEM SONLANDI</b>\n"
-                            f"Coin: {name} | Durum: {res_text}\n"
-                            f"P/L: {final_pnl:+.2f} USDT\n"
-                            f"Kasa: {wallet_balances[symbol]:.2f} USDT"
+                            f"✅ <b>İŞLEM KAPANDI ({name})</b>\n"
+                            f"Sonuç: {res_text}\n"
+                            f"Net P/L: {exit_pnl:+.2f} USDT\n"
+                            f"Güncel Kasa: {wallet_balances[symbol]:.2f} USDT"
                         )
                     else:
                         status_code = side
 
                 display_wallet = wallet_balances[symbol] + (MARGIN_PER_TRADE + unrealized_pnl if positions.get(symbol) else 0)
-                status_emoji = {
-                    "BOŞ": "⚪️ BOŞ",
-                    "LONG": "🟢 LONG",
-                    "SHORT": "🔴 SHORT",
-                }[status_code]
+                status_emoji = {"BOŞ": "⚪️ BOŞ", "LONG": "🟢 LONG", "SHORT": "🔴 SHORT"}[status_code]
 
-                lines.append(f"🔸 <b>{name}:</b> {current_price}")
-                lines.append(f"└ {status_emoji} | 💵 {display_wallet:.2f}$ | 📈 {unrealized_pnl:+.2f}$")
+                lines.append(f"🔸 <b>{name}:</b> {current_price} | {status_emoji} | 💵 {display_wallet:.2f}$ | 📈 {unrealized_pnl:+.2f}$")
 
             total_cash = sum(wallet_balances.values())
             total_realized = sum(realized_pnl.values())
             total_equity = total_cash + sum(float(p["margin"]) for p in positions.values() if p) + total_unrealized_pnl
             pnl_pct = (total_unrealized_pnl / total_equity * 100) if total_equity > 0 else 0.0
 
-            lines.append("\n<b>📊 GENEL PORTFÖY ÖZETİ</b>")
+            lines.append("\n📊 <b>GENEL PORTFÖY ÖZETİ</b>")
             lines.append(f"💵 <b>Toplam Varlık:</b> {total_equity:.2f} USDT")
             lines.append(f"📈 <b>Açık K/Z:</b> {total_unrealized_pnl:+.2f} USDT (<b>%{pnl_pct:+.2f}</b>)")
             lines.append(f"💰 <b>Realize K/Z:</b> {total_realized:+.2f} USDT")
 
-            output_text = "\n".join(lines)
-            print("\n" + output_text.replace("<b>", "").replace("</b>", ""))
+            report_output = "\n".join(lines)
+
+            # İşlem gerçekleştiğinde (pozisyon açıldı veya kapandıysa) Telegram'a anında tam listeyi gönder
+            if position_activity_detected:
+                send_telegram_msg("🚨 <b>PORTFÖY HAREKETİ TESPİT EDİLDİ!</b>\n\n" + report_output)
 
             for event in trade_events:
                 send_telegram_msg(event)
-
-            now_ts = time.time()
-            if now_ts - last_telegram_time >= TELEGRAM_NOTIFY_INTERVAL:
-                send_telegram_msg(output_text)
-                last_telegram_time = now_ts
 
             save_state(positions, wallet_balances, realized_pnl, trade_number)
             time.sleep(LOOP_SECONDS)
