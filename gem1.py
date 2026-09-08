@@ -38,7 +38,7 @@ def start_health_check_server():
 threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ============================================================
-# LOGGING VE KONFİGÜRASYON
+# LOGGING VE KONFİGÜRASYON (Akıllı Değişken Okuma)
 # ============================================================
 logging.basicConfig(
     level=logging.INFO,
@@ -46,13 +46,21 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 
-TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN", "BURAYA_BOT_TOKENINI_YAZ")
-TELEGRAM_CHAT_ID = os.getenv("CHAT_ID", "BURAYA_CHAT_ID_YAZ")
+# Render veya yerel ortam değişkenlerindeki farklı isim varyasyonlarını destekler
+TELEGRAM_BOT_TOKEN = (
+    os.getenv("TELEGRAM_BOT_TOKEN") or 
+    os.getenv("BOT_TOKEN", "BURAYA_BOT_TOKENINI_YAZ")
+)
+TELEGRAM_CHAT_ID = (
+    os.getenv("TELEGRAM_CHAT_ID") or 
+    os.getenv("CHAT_ID", "BURAYA_CHAT_ID_YAZ")
+)
+
 SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "13.5"))
 DB_FILE = os.getenv("DB_FILE", "trades_db.json")
 
 # ============================================================
-# 15 ADET SEÇİLEN COİN LİSTESİ (Alt Alta Sıralı)
+# 15 ADET SEÇİLEN COİN LİSTESİ
 # ============================================================
 SYMBOLS = {
     "BTC/USDT": "BTC",
@@ -91,8 +99,9 @@ def now_date_text():
 
 def send_telegram_msg(message):
     if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "BURAYA_BOT_TOKENINI_YAZ":
-        print(f"\n[TELEGRAM MESAJI]:\n{message}\n")
+        print(f"\n[TELEGRAM UYARI - Token Tanımlı Değil]:\n{message}\n")
         return False
+        
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -102,9 +111,12 @@ def send_telegram_msg(message):
     }
     try:
         res = requests.post(url, json=payload, timeout=10)
-        return res.status_code == 200
+        if res.status_code != 200:
+            print(f"Telegram Gönderim Hatası (Status {res.status_code}): {res.text}")
+            return False
+        return True
     except Exception as e:
-        print(f"Telegram Gönderim Hatası: {e}")
+        print(f"Telegram Bağlantı Hatası: {e}")
         return False
 
 # ============================================================
@@ -127,11 +139,11 @@ def get_klines_df(symbol, timeframe=TIMEFRAME, limit=LIMIT):
         return None
 
 # ============================================================
-# SMC & MTF SKORLAMA MOTORU (Düzeltildi)
+# SMC & MTF SKORLAMA MOTORU
 # ============================================================
 def calculate_smc_analysis(df, symbol):
     if df is None or len(df) < 50:
-        return None, 0.0, 0.0, 0.0  # 0..0 hatası düzeltildi
+        return None, 0.0, 0.0, 0.0
 
     closes = df["close"].values
     highs = df["high"].values
@@ -140,12 +152,10 @@ def calculate_smc_analysis(df, symbol):
 
     price = closes[-1]
     
-    # Teknik İndikatörler
     ma50 = pd.Series(closes).rolling(50).mean().iloc[-1]
     ma100 = pd.Series(closes).rolling(min(100, len(closes))).mean().iloc[-1]
     ma200 = pd.Series(closes).rolling(min(200, len(closes))).mean().iloc[-1]
     
-    # RSI Hesaplama
     delta = pd.Series(closes).diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -153,7 +163,6 @@ def calculate_smc_analysis(df, symbol):
     rsi = 100 - (100 / (1 + rs))
     current_rsi = rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50.0
 
-    # SMC / Price Action Simülasyon Koşulları
     info = {
         "sellside_sweep": lows[-1] <= np.min(lows[-10:-1]),
         "buyside_sweep": highs[-1] >= np.max(highs[-10:-1]),
@@ -254,13 +263,13 @@ def main():
         realized_pnl = {s: 0.0 for s in SYMBOLS}
         trade_number = 0
 
-    print("SMC & Price Action 15 Coin Bot Başlatılıyor...")
+    print("SMC & Price Action Bot Başlatılıyor...")
 
     initial_lines = [
         "🛡 <b>SMC & PRICE ACTION BAŞLANGIÇ RAPORU</b>",
         f"🗓 <b>Tarih:</b> {now_date_text()}",
         f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n",
-        "🪙 <b>15 COİN DURUMLARI (ALT ALTA SIRALI)</b>"
+        "🪙 <b>15 COİN DURUMLARI</b>"
     ]
 
     for symbol, name in SYMBOLS.items():
@@ -288,7 +297,7 @@ def main():
                 "🛡 <b>SMC & PRICE ACTION GÜNCEL RAPORU</b>",
                 f"🗓 <b>Tarih:</b> {now_date_text()}",
                 f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n",
-                "🪙 <b>15 COİN DURUMLARI (ALT ALTA SIRALI)</b>"
+                "🪙 <b>15 COİN DURUMLARI</b>"
             ]
 
             for symbol, name in SYMBOLS.items():
@@ -344,7 +353,7 @@ def main():
                         wallet_balances[symbol] += MARGIN_PER_TRADE + exit_pnl
                         realized_pnl[symbol] = realized_pnl.get(symbol, 0.0) + exit_pnl
                         positions[symbol] = None
-                        position_activity_detected = True
+                        position_activity_details = True
 
                         res_text = "🎯 TAKE PROFIT" if hit_tp else "🛑 STOP LOSS"
                         trade_events.append(
@@ -373,6 +382,8 @@ def main():
 
             report_output = "\n".join(lines)
 
+            # Her döngüde veya sadece işlem aktivitesinde Telegram'a gönderilmesini isterseniz burayı düzenleyebilirsiniz.
+            # Şimdilik her işlem hareketinde veya belirli aralıklarla mesaj düşmesi için:
             if position_activity_detected:
                 send_telegram_msg("🚨 <b>PORTFÖY HAREKETİ TESPİT EDİLDİ!</b>\n\n" + report_output)
 
