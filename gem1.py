@@ -92,7 +92,7 @@ def now_date_text():
 
 def send_telegram_msg(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"\n[TELEGRAM UYARI - Token/ChatID Eksik]:\n{message}\n", flush=True)
+        logging.warning(f"Telegram Token/ChatID Eksik! Gönderilemeyen Mesaj:\n{message}")
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = json.dumps({
@@ -107,7 +107,7 @@ def send_telegram_msg(message):
         with urlopen(req, timeout=10) as res:
             return res.status == 200
     except Exception as e:
-        print(f"Telegram Gönderim Hatası: {e}", flush=True)
+        logging.error(f"Telegram Gönderim Hatası: {e}")
         return False
 
 # ============================================================
@@ -121,8 +121,7 @@ def get_klines_df(symbol):
             res_json = json.loads(response.read().decode("utf-8"))
             if res_json and res_json.get("success") and "data" in res_json:
                 d = res_json["data"]
-                if isinstance(d, dict) and "close" in d:
-                    # MEXC API'si hacim verisini "vol" olarak gönderir. Güvenlik için ikisini de kontrol ediyoruz.
+                if isinstance(d, dict) and "close" in d and len(d["close"]) > 0:
                     vol_data = d.get("vol", d.get("volume", []))
                     
                     opens = [float(x) for x in d.get("open", [])]
@@ -131,30 +130,28 @@ def get_klines_df(symbol):
                     closes = [float(x) for x in d.get("close", [])]
                     volumes = [float(x) for x in vol_data]
 
-                    # Güvenlik Duvarı: Tüm dizilerin uzunluğu aynı mı kontrol et
-                    lengths = [len(opens), len(highs), len(lows), len(closes), len(volumes)]
-                    if len(set(lengths)) != 1:
-                        print(f"Veri uyuşmazlığı ({symbol}): Dizi uzunlukları eşit değil -> {lengths}", flush=True)
+                    # Güvenlik Duvarı: En kısa dizi uzunluğuna göre hizala
+                    min_len = min(len(opens), len(highs), len(lows), len(closes), len(volumes))
+                    if min_len < 30:
                         return None
 
                     df = pd.DataFrame({
-                        'open': opens,
-                        'high': highs,
-                        'low': lows,
-                        'close': closes,
-                        'volume': volumes
+                        'open': opens[:min_len],
+                        'high': highs[:min_len],
+                        'low': lows[:min_len],
+                        'close': closes[:min_len],
+                        'volume': volumes[:min_len]
                     })
-                    if len(df) >= 30:
-                        return df
+                    return df
     except Exception as e:
-        print(f"Veri çekme hatası ({symbol}): {e}", flush=True)
+        logging.error(f"Veri çekme hatası ({symbol}): {e}")
     return None
 
 # ============================================================
 # SMC & SKORLAMA MOTORU
 # ============================================================
 def calculate_smc_analysis(df):
-    if df is None or len(df) < 50:
+    if df is None or len(df) < 30:
         return "BOŞ", 0.0, 50.0, 0.0
 
     closes = df["close"].values
@@ -163,26 +160,29 @@ def calculate_smc_analysis(df):
     volumes = df["volume"].values
     price = closes[-1]
     
-    ma50 = pd.Series(closes).rolling(50).mean().iloc[-1]
+    ma50 = pd.Series(closes).rolling(min(50, len(closes))).mean().iloc[-1]
     ma100 = pd.Series(closes).rolling(min(100, len(closes))).mean().iloc[-1]
     ma200 = pd.Series(closes).rolling(min(200, len(closes))).mean().iloc[-1]
     
+    # RSI Hesaplama (0'a Bölünme Korumalı)
     delta = pd.Series(closes).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    current_rsi = rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50.0
+    gain = (delta.where(delta > 0, 0.0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+    
+    rs = gain / loss.replace(0, np.nan)
+    rsi_series = 100.0 - (100.0 / (1.0 + rs))
+    rsi_series = rsi_series.fillna(100.0)
+    current_rsi = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 50.0
 
     info = {
-        "sellside_sweep": lows[-1] <= np.min(lows[-10:-1]),
-        "buyside_sweep": highs[-1] >= np.max(highs[-10:-1]),
-        "bullish_ob": closes[-1] > closes[-2] and volumes[-1] > np.mean(volumes[-10:]),
-        "bearish_ob": closes[-1] < closes[-2] and volumes[-1] > np.mean(volumes[-10:]),
-        "bullish_bos": closes[-1] > np.max(highs[-15:-1]),
-        "bearish_bos": closes[-1] < np.min(lows[-15:-1]),
-        "bullish_fvg": (highs[-2] < lows[-1]),
-        "bearish_fvg": (lows[-2] > highs[-1]),
+        "sellside_sweep": lows[-1] <= np.min(lows[-10:-1]) if len(lows) >= 10 else False,
+        "buyside_sweep": highs[-1] >= np.max(highs[-10:-1]) if len(highs) >= 10 else False,
+        "bullish_ob": closes[-1] > closes[-2] and volumes[-1] > np.mean(volumes[-10:]) if len(volumes) >= 10 else False,
+        "bearish_ob": closes[-1] < closes[-2] and volumes[-1] > np.mean(volumes[-10:]) if len(volumes) >= 10 else False,
+        "bullish_bos": closes[-1] > np.max(highs[-15:-1]) if len(highs) >= 15 else False,
+        "bearish_bos": closes[-1] < np.min(lows[-15:-1]) if len(lows) >= 15 else False,
+        "bullish_fvg": (highs[-2] < lows[-1]) if len(highs) >= 2 else False,
+        "bearish_fvg": (lows[-2] > highs[-1]) if len(lows) >= 2 else False,
         "above_ma50": price > ma50,
         "above_ma100": price > ma100,
         "above_ma200": price > ma200,
@@ -238,7 +238,7 @@ def save_state(positions, wallet_balances, realized_pnl, trade_number):
         with open(DB_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        print(f"Durum kaydedilemedi: {e}", flush=True)
+        logging.error(f"Durum kaydedilemedi: {e}")
 
 def load_state():
     if not os.path.exists(DB_FILE):
@@ -265,22 +265,8 @@ def main():
         realized_pnl = {s: 0.0 for s in SYMBOLS}
         trade_number = 0
 
-    print("MEXC Pro Alfa Trade Bot Başlatılıyor...", flush=True)
-
-    initial_lines = [
-        "🛡 <b>MEXC PRO ALFA BAŞLANGIÇ RAPORU</b>",
-        f"🗓 <b>Tarih:</b> {now_date_text()}",
-        f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n",
-        "🪙 <b>COIN DURUMLARI</b>"
-    ]
-    for symbol, name in SYMBOLS.items():
-        initial_lines.append(f"🔸 <b>{name}:</b> Yükleniyor...\n└ ⚪️ BOŞ | 💵 50.00$ | 📈 +0.00$")
-    initial_lines.append("\n📊 <b>GENEL PORTFÖY ÖZETİ</b>")
-    initial_lines.append(f"💵 <b>Toplam Varlık:</b> {len(SYMBOLS)*50.0:.2f} USDT")
-    initial_lines.append("📈 <b>Açık K/Z:</b> +0.00 USDT (%+0.00)")
-    initial_lines.append(f"💰 <b>Realize K/Z:</b> +0.00 USDT")
-
-    send_telegram_msg("\n".join(initial_lines))
+    logging.info("MEXC Pro Alfa Trade Bot Başlatılıyor...")
+    is_first_run = True
 
     while True:
         try:
@@ -288,13 +274,16 @@ def main():
             total_unrealized_pnl = 0.0
             position_activity_detected = False
 
+            # Verileri paralel olarak çek ve analiz et
             with ThreadPoolExecutor(max_workers=5) as executor:
                 results = list(executor.map(analyze, SYMBOLS.items()))
 
             analysis_dict = {r[0]: r[1:] for r in results}
 
+            report_header = "🛡 <b>MEXC PRO ALFA BAŞLANGIÇ RAPORU</b>" if is_first_run else "🛡 <b>MEXC PRO ALFA TRADE RAPORU</b>"
+
             lines = [
-                "🛡 <b>MEXC PRO ALFA TRADE RAPORU</b>",
+                report_header,
                 f"🗓 <b>Tarih:</b> {now_date_text()}",
                 f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n",
                 "🪙 <b>COIN DURUMLARI</b>"
@@ -305,13 +294,14 @@ def main():
                 wallet = wallet_balances.get(symbol, STARTING_BALANCE_PER_COIN)
 
                 if current_price is None:
-                    lines.append(f"🔸 <b>{name}:</b> N/A\n└ ⚪️ BOŞ | 💵 {wallet:.2f}$ | 📈 +0.00$")
+                    lines.append(f"🔸 <b>{name}:</b> Veri Bekleniyor\n└ ⚪️ BOŞ | 💵 {wallet:.2f}$ | 📈 +0.00$")
                     continue
 
                 pos = positions.get(symbol)
                 unrealized_pnl = 0.0
                 status_code = "BOŞ"
 
+                # İşlem Giriş Kontrolü
                 if pos is None and signal in ("LONG", "SHORT") and wallet >= MARGIN_PER_TRADE:
                     trade_number += 1
                     tp = current_price * (1 + TAKE_PROFIT_PCT) if signal == "LONG" else current_price * (1 - TAKE_PROFIT_PCT)
@@ -363,7 +353,7 @@ def main():
                 display_wallet = wallet_balances[symbol] + (MARGIN_PER_TRADE + unrealized_pnl if positions.get(symbol) else 0)
                 status_emoji = {"BOŞ": "⚪️ BOŞ", "LONG": "🟢 LONG", "SHORT": "🔴 SHORT"}[status_code]
 
-                lines.append(f"🔸 <b>{name}:</b> {current_price}\n└ {status_emoji} | 💵 {display_wallet:.2f}$ | 📈 {unrealized_pnl:+.2f}$")
+                lines.append(f"🔸 <b>{name}:</b> ${current_price:.4f}\n└ {status_emoji} | 💵 {display_wallet:.2f}$ | 📈 {unrealized_pnl:+.2f}$")
 
             total_cash = sum(wallet_balances.values())
             total_realized = sum(realized_pnl.values())
@@ -377,8 +367,11 @@ def main():
 
             report_output = "\n".join(lines)
 
-            # İşlem hareketlerinde veya düzenli olarak raporu gönder
-            if position_activity_detected:
+            # İlk çalışmada canlı fiyatlı Başlangıç Raporu gönder, sonraki döngülerde hareket olunca gönder
+            if is_first_run:
+                send_telegram_msg(report_output)
+                is_first_run = False
+            elif position_activity_detected:
                 send_telegram_msg("🚨 <b>PORTFÖY HAREKETİ TESPİT EDİLDİ!</b>\n\n" + report_output)
 
             for event in trade_events:
@@ -388,11 +381,11 @@ def main():
             time.sleep(LOOP_SECONDS)
 
         except KeyboardInterrupt:
-            print("\nBot kapatılıyor...", flush=True)
+            logging.info("Bot kapatılıyor...")
             save_state(positions, wallet_balances, realized_pnl, trade_number)
             break
         except Exception as e:
-            print(f"Hata oluştu: {e}", flush=True)
+            logging.error(f"Hata oluştu: {e}")
             time.sleep(15)
 
 if __name__ == "__main__":
