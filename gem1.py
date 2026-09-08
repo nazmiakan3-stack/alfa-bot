@@ -127,11 +127,11 @@ def get_klines_df(symbol, timeframe=TIMEFRAME, limit=LIMIT):
         return None
 
 # ============================================================
-# SMC & MTF SKORLAMA MOTORU (Kaynak Kod Standartlarında)
+# SMC & MTF SKORLAMA MOTORU (Düzeltildi)
 # ============================================================
 def calculate_smc_analysis(df, symbol):
     if df is None or len(df) < 50:
-        return None, 0..0, 0.0, 0.0
+        return None, 0.0, 0.0, 0.0  # 0..0 hatası düzeltildi
 
     closes = df["close"].values
     highs = df["high"].values
@@ -153,7 +153,7 @@ def calculate_smc_analysis(df, symbol):
     rsi = 100 - (100 / (1 + rs))
     current_rsi = rsi.iloc[-1] if not pd.isna(rsi.iloc[-1]) else 50.0
 
-    # SMC / Price Action Simülasyon Koşulları (Proxy & Yapısal Tespiti)
+    # SMC / Price Action Simülasyon Koşulları
     info = {
         "sellside_sweep": lows[-1] <= np.min(lows[-10:-1]),
         "buyside_sweep": highs[-1] >= np.max(highs[-10:-1]),
@@ -171,17 +171,16 @@ def calculate_smc_analysis(df, symbol):
 
     skor_l, skor_s = 0.0, 0.0
 
-    # Skorlama mantığı (Notebook Kaynaklarından Alınmıştır)[span_2](start_span)[span_2](end_span)
     if info.get("sellside_sweep"): skor_l += 1.57
     if info.get("buyside_sweep"): skor_s += 1.57
 
     if info.get("bullish_ob"): skor_l += 1.57
     if info.get("bearish_ob"): skor_s += 1.57
 
-    if info.get("bullish_bos"): skor_l += 1.80; skor_l += 1.35  # BOS + CHoCH proxy
+    if info.get("bullish_bos"): skor_l += 1.80; skor_l += 1.35  
     if info.get("bearish_bos"): skor_s += 1.80; skor_s += 1.35
 
-    if info.get("bullish_fvg"): skor_l += 1.35; skor_l += 1.35  # FVG + SFP proxy
+    if info.get("bullish_fvg"): skor_l += 1.35; skor_l += 1.35  
     if info.get("bearish_fvg"): skor_s += 1.35; skor_s += 1.35
 
     if info.get("above_ma50"): 
@@ -198,7 +197,6 @@ def calculate_smc_analysis(df, symbol):
     if current_rsi > 50: skor_l += 1.12
     else: skor_s += 1.12
 
-    # Karar Mekanizması
     if skor_l >= skor_s and skor_l >= SCORE_THRESHOLD:
         return "LONG", price, current_rsi, skor_l
     elif skor_s > skor_l and skor_s >= SCORE_THRESHOLD:
@@ -258,7 +256,6 @@ def main():
 
     print("SMC & Price Action 15 Coin Bot Başlatılıyor...")
 
-    # İLK ÇALIŞTIRILDIĞINDA ANINDA LİSTEYİ VE RAPORU GÖNDER
     initial_lines = [
         "🛡 <b>SMC & PRICE ACTION BAŞLANGIÇ RAPORU</b>",
         f"🗓 <b>Tarih:</b> {now_date_text()}",
@@ -306,7 +303,6 @@ def main():
                 unrealized_pnl = 0.0
                 status_code = "BOŞ"
 
-                # POZİSYON AÇMA KONTROLÜ (SMC Sinyali ile)
                 if pos is None and signal in ("LONG", "SHORT") and wallet >= MARGIN_PER_TRADE:
                     trade_number += 1
                     tp = current_price * (1 + TAKE_PROFIT_PCT) if signal == "LONG" else current_price * (1 - TAKE_PROFIT_PCT)
@@ -333,7 +329,6 @@ def main():
                         f"Hedef (TP): {tp:.4f} | Stop (SL): {sl:.4f}"
                     )
 
-                # AÇIK POZİSYONLARI YÖNET
                 if pos is not None:
                     side, entry = pos["side"], float(pos["entry"])
                     pct = (current_price - entry) / entry if side == "LONG" else (entry - current_price) / entry
@@ -378,7 +373,6 @@ def main():
 
             report_output = "\n".join(lines)
 
-            # İşlem gerçekleştiğinde (pozisyon açıldı veya kapandıysa) Telegram'a anında tam listeyi gönder
             if position_activity_detected:
                 send_telegram_msg("🚨 <b>PORTFÖY HAREKETİ TESPİT EDİLDİ!</b>\n\n" + report_output)
 
