@@ -10,10 +10,7 @@ import threading
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import requests
-import ccxt
-import pandas as pd
-import numpy as np
+from urllib.request import Request, urlopen
 
 # ============================================================
 # 0. RENDER & UPTIMEROBOT İÇİN DAHİLİ HTTP SUNUCUSU
@@ -22,7 +19,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"SMC Trading Bot is alive and running!")
+        self.wfile.write(b"MEXC Alpha Trading Bot is alive and running!")
     def do_HEAD(self):
         self.send_response(200)
         self.end_headers()
@@ -34,11 +31,10 @@ def start_health_check_server():
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
-# Arka planda web sunucusunu başlat (Render uyku modunu engeller)
 threading.Thread(target=start_health_check_server, daemon=True).start()
 
 # ============================================================
-# LOGGING VE KONFİGÜRASYON (Akıllı Değişken Okuma)
+# LOGGING VE KONFİGÜRASYON
 # ============================================================
 logging.basicConfig(
     level=logging.INFO,
@@ -46,41 +42,33 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 
-# Render veya yerel ortam değişkenlerindeki farklı isim varyasyonlarını destekler
-TELEGRAM_BOT_TOKEN = (
-    os.getenv("TELEGRAM_BOT_TOKEN") or 
-    os.getenv("BOT_TOKEN", "BURAYA_BOT_TOKENINI_YAZ")
-)
-TELEGRAM_CHAT_ID = (
-    os.getenv("TELEGRAM_CHAT_ID") or 
-    os.getenv("CHAT_ID", "BURAYA_CHAT_ID_YAZ")
-)
-
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN", "BURAYA_BOT_TOKENINI_YAZ")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID", "BURAYA_CHAT_ID_YAZ")
 SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "13.5"))
 DB_FILE = os.getenv("DB_FILE", "trades_db.json")
 
 # ============================================================
-# 15 ADET SEÇİLEN COİN LİSTESİ
+# 15 ADET SEÇİLEN COİN LİSTESİ (MEXC Formatı)
 # ============================================================
 SYMBOLS = {
-    "BTC/USDT": "BTC",
-    "ETH/USDT": "ETH",
-    "SOL/USDT": "SOL",
-    "BNB/USDT": "BNB",
-    "XRP/USDT": "XRP",
-    "ADA/USDT": "ADA",
-    "DOGE/USDT": "DOGE",
-    "AVAX/USDT": "AVAX",
-    "LINK/USDT": "LINK",
-    "DOT/USDT": "DOT",
-    "NEAR/USDT": "NEAR",
-    "MATIC/USDT": "MATIC",
-    "ARB/USDT": "ARB",
-    "SUI/USDT": "SUI",
-    "FTM/USDT": "FTM",
+    "BTC_USDT": "BTC",
+    "ETH_USDT": "ETH",
+    "SOL_USDT": "SOL",
+    "BNB_USDT": "BNB",
+    "XRP_USDT": "XRP",
+    "ADA_USDT": "ADA",
+    "DOGE_USDT": "DOGE",
+    "AVAX_USDT": "AVAX",
+    "LINK_USDT": "LINK",
+    "DOT_USDT": "DOT",
+    "NEAR_USDT": "NEAR",
+    "MATIC_USDT": "MATIC",
+    "ARB_USDT": "ARB",
+    "SUI_USDT": "SUI",
+    "FTM_USDT": "FTM",
 }
 
-TIMEFRAME = "1h"
+TIMEFRAME = "60m"  # MEXC 1h için 60m kullanır
 LIMIT = 150
 LOOP_SECONDS = 60
 
@@ -99,57 +87,57 @@ def now_date_text():
 
 def send_telegram_msg(message):
     if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "BURAYA_BOT_TOKENINI_YAZ":
-        print(f"\n[TELEGRAM UYARI - Token Tanımlı Değil]:\n{message}\n")
+        print(f"\n[TELEGRAM UYARI]:\n{message}\n")
         return False
-        
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
+    payload = json.dumps({
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
         "parse_mode": "HTML",
         "disable_web_page_preview": True
-    }
+    }).encode("utf-8")
+    headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
     try:
-        res = requests.post(url, json=payload, timeout=10)
-        if res.status_code != 200:
-            print(f"Telegram Gönderim Hatası (Status {res.status_code}): {res.text}")
-            return False
-        return True
+        req = Request(url, data=payload, headers=headers, method="POST")
+        with urlopen(req, timeout=10) as res:
+            return res.status == 200
     except Exception as e:
-        print(f"Telegram Bağlantı Hatası: {e}")
+        print(f"Telegram Gönderim Hatası: {e}")
         return False
 
 # ============================================================
-# CCXT BORSASI VERİ ÇEKME
+# MEXC DOĞRUDAN VERİ ÇEKME (Render Engelini Aşar)
 # ============================================================
-exchange = ccxt.binance({
-    'enableRateLimit': True,
-    'options': {'defaultType': 'future'}
-})
-
-def get_klines_df(symbol, timeframe=TIMEFRAME, limit=LIMIT):
+def get_klines_df(symbol):
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        if not ohlcv:
-            return None
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        return df
+        url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval={TIMEFRAME}&limit={LIMIT}"
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            if data and isinstance(data, list) and len(data) > 0:
+                # Pandas DataFrame dönüşümü
+                import pandas as pd
+                df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume'])
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = df[col].astype(float)
+                return df
     except Exception as e:
-        print(f"Veri çekme hatası ({symbol}): {e}")
-        return None
+        print(f"MEXC Veri çekme hatası ({symbol}): {e}")
+    return None
 
 # ============================================================
-# SMC & MTF SKORLAMA MOTORU
+# SMC & SKORLAMA MOTORU
 # ============================================================
 def calculate_smc_analysis(df, symbol):
+    import numpy as np
+    import pandas as pd
     if df is None or len(df) < 50:
-        return None, 0.0, 0.0, 0.0
+        return "BOŞ", 0.0, 50.0, 0.0
 
     closes = df["close"].values
     highs = df["high"].values
     lows = df["low"].values
     volumes = df["volume"].values
-
     price = closes[-1]
     
     ma50 = pd.Series(closes).rolling(50).mean().iloc[-1]
@@ -179,30 +167,21 @@ def calculate_smc_analysis(df, symbol):
     }
 
     skor_l, skor_s = 0.0, 0.0
-
     if info.get("sellside_sweep"): skor_l += 1.57
     if info.get("buyside_sweep"): skor_s += 1.57
-
     if info.get("bullish_ob"): skor_l += 1.57
     if info.get("bearish_ob"): skor_s += 1.57
+    if info.get("bullish_bos"): skor_l += 3.15
+    if info.get("bearish_bos"): skor_s += 3.15
+    if info.get("bullish_fvg"): skor_l += 2.70
+    if info.get("bearish_fvg"): skor_s += 2.70
 
-    if info.get("bullish_bos"): skor_l += 1.80; skor_l += 1.35  
-    if info.get("bearish_bos"): skor_s += 1.80; skor_s += 1.35
-
-    if info.get("bullish_fvg"): skor_l += 1.35; skor_l += 1.35  
-    if info.get("bearish_fvg"): skor_s += 1.35; skor_s += 1.35
-
-    if info.get("above_ma50"): 
-        skor_l += 1.12 + 0.90
-    else: 
-        skor_s += 1.12 + 0.90
-
+    if info.get("above_ma50"): skor_l += 2.02
+    else: skor_s += 2.02
     if info.get("above_ma100"): skor_l += 0.90
     else: skor_s += 0.90
-
     if info.get("above_ma200"): skor_l += 1.35
     else: skor_s += 1.35
-
     if current_rsi > 50: skor_l += 1.12
     else: skor_s += 1.12
 
@@ -222,7 +201,7 @@ def analyze(symbol_tuple):
     return symbol, signal, price, rsi, score
 
 # ============================================================
-# PERSISTENCE (STATE MANAGEMENT)
+# STATE MANAGEMENT (DB)
 # ============================================================
 def save_state(positions, wallet_balances, realized_pnl, trade_number):
     state = {
@@ -248,7 +227,7 @@ def load_state():
         return None
 
 # ============================================================
-# ANA DÖNGÜ VE RAPORLAMA
+# ANA DÖNGÜ
 # ============================================================
 def main():
     state = load_state()
@@ -263,18 +242,16 @@ def main():
         realized_pnl = {s: 0.0 for s in SYMBOLS}
         trade_number = 0
 
-    print("SMC & Price Action Bot Başlatılıyor...")
+    print("MEXC Pro Alfa Trade Bot Başlatılıyor...")
 
     initial_lines = [
-        "🛡 <b>SMC & PRICE ACTION BAŞLANGIÇ RAPORU</b>",
+        "🛡 <b>MEXC PRO ALFA BAŞLANGIÇ RAPORU</b>",
         f"🗓 <b>Tarih:</b> {now_date_text()}",
         f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n",
-        "🪙 <b>15 COİN DURUMLARI</b>"
+        "🪙 <b>COIN DURUMLARI</b>"
     ]
-
     for symbol, name in SYMBOLS.items():
-        initial_lines.append(f"🔸 <b>{name}:</b> N/A | ⚪️ BOŞ | 💵 50.00$ | 📈 +0.00$")
-
+        initial_lines.append(f"🔸 <b>{name}:</b> Yükleniyor... | ⚪️ BOŞ | 💵 50.00$ | 📈 +0.00$")
     initial_lines.append("\n📊 <b>GENEL PORTFÖY ÖZETİ</b>")
     initial_lines.append(f"💵 <b>Toplam Varlık:</b> {len(SYMBOLS)*50.0:.2f} USDT")
     initial_lines.append("📈 <b>Açık K/Z:</b> +0.00 USDT (%+0.00)")
@@ -294,10 +271,10 @@ def main():
             analysis_dict = {r[0]: r[1:] for r in results}
 
             lines = [
-                "🛡 <b>SMC & PRICE ACTION GÜNCEL RAPORU</b>",
+                "🛡 <b>MEXC PRO ALFA TRADE RAPORU</b>",
                 f"🗓 <b>Tarih:</b> {now_date_text()}",
                 f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n",
-                "🪙 <b>15 COİN DURUMLARI</b>"
+                "🪙 <b>COIN DURUMLARI</b>"
             ]
 
             for symbol, name in SYMBOLS.items():
@@ -305,7 +282,7 @@ def main():
                 wallet = wallet_balances.get(symbol, STARTING_BALANCE_PER_COIN)
 
                 if current_price is None:
-                    lines.append(f"🔸 <b>{name}:</b> N/A | ⚪️ BOŞ | 💵 {wallet:.2f}$ | 📈 +0.00$")
+                    lines.append(f"🔸 <b>{name}:</b> N/A\n└ ⚪️ BOŞ | 💵 {wallet:.2f}$ | 📈 +0.00$")
                     continue
 
                 pos = positions.get(symbol)
@@ -319,14 +296,9 @@ def main():
 
                     wallet_balances[symbol] -= MARGIN_PER_TRADE
                     positions[symbol] = {
-                        "id": trade_number,
-                        "side": signal,
-                        "entry": current_price,
-                        "tp": tp,
-                        "sl": sl,
-                        "margin": MARGIN_PER_TRADE,
-                        "leverage": LEVERAGE,
-                        "position_size": POSITION_SIZE
+                        "id": trade_number, "side": signal, "entry": current_price,
+                        "tp": tp, "sl": sl, "margin": MARGIN_PER_TRADE,
+                        "leverage": LEVERAGE, "position_size": POSITION_SIZE
                     }
                     pos = positions[symbol]
                     position_activity_detected = True
@@ -353,7 +325,7 @@ def main():
                         wallet_balances[symbol] += MARGIN_PER_TRADE + exit_pnl
                         realized_pnl[symbol] = realized_pnl.get(symbol, 0.0) + exit_pnl
                         positions[symbol] = None
-                        position_activity_details = True
+                        position_activity_detected = True
 
                         res_text = "🎯 TAKE PROFIT" if hit_tp else "🛑 STOP LOSS"
                         trade_events.append(
@@ -368,7 +340,7 @@ def main():
                 display_wallet = wallet_balances[symbol] + (MARGIN_PER_TRADE + unrealized_pnl if positions.get(symbol) else 0)
                 status_emoji = {"BOŞ": "⚪️ BOŞ", "LONG": "🟢 LONG", "SHORT": "🔴 SHORT"}[status_code]
 
-                lines.append(f"🔸 <b>{name}:</b> {current_price} | {status_emoji} | 💵 {display_wallet:.2f}$ | 📈 {unrealized_pnl:+.2f}$")
+                lines.append(f"🔸 <b>{name}:</b> {current_price}\n└ {status_emoji} | 💵 {display_wallet:.2f}$ | 📈 {unrealized_pnl:+.2f}$")
 
             total_cash = sum(wallet_balances.values())
             total_realized = sum(realized_pnl.values())
@@ -382,8 +354,6 @@ def main():
 
             report_output = "\n".join(lines)
 
-            # Her döngüde veya sadece işlem aktivitesinde Telegram'a gönderilmesini isterseniz burayı düzenleyebilirsiniz.
-            # Şimdilik her işlem hareketinde veya belirli aralıklarla mesaj düşmesi için:
             if position_activity_detected:
                 send_telegram_msg("🚨 <b>PORTFÖY HAREKETİ TESPİT EDİLDİ!</b>\n\n" + report_output)
 
