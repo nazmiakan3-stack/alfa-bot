@@ -108,7 +108,7 @@ def send_telegram_msg(message):
         return False
 
 # ============================================================
-# MEXC FUTURES VERİ ÇEKME & PARSE ETME
+# MEXC FUTURES VERİ ÇEKME & PARSE ETME (DÜZELTİLDİ)
 # ============================================================
 def get_klines_df(symbol):
     try:
@@ -118,14 +118,28 @@ def get_klines_df(symbol):
             res_json = json.loads(response.read().decode("utf-8"))
             if res_json and res_json.get("success") and "data" in res_json:
                 d = res_json["data"]
-                # MEXC futures kline verisi genellikle dict içinde listeler döner
                 if isinstance(d, dict) and "close" in d:
+                    # MEXC API'si hacim verisini "vol" olarak gönderir. Güvenlik için ikisini de kontrol ediyoruz.
+                    vol_data = d.get("vol", d.get("volume", []))
+                    
+                    opens = [float(x) for x in d.get("open", [])]
+                    highs = [float(x) for x in d.get("high", [])]
+                    lows = [float(x) for x in d.get("low", [])]
+                    closes = [float(x) for x in d.get("close", [])]
+                    volumes = [float(x) for x in vol_data]
+
+                    # Hata önleme: Tüm dizilerin uzunluğu aynı mı kontrol et
+                    lengths = [len(opens), len(highs), len(lows), len(closes), len(volumes)]
+                    if len(set(lengths)) != 1:
+                        print(f"Veri uyuşmazlığı ({symbol}): Dizi uzunlukları eşit değil -> {lengths}")
+                        return None
+
                     df = pd.DataFrame({
-                        'open': [float(x) for x in d.get("open", [])],
-                        'high': [float(x) for x in d.get("high", [])],
-                        'low': [float(x) for x in d.get("low", [])],
-                        'close': [float(x) for x in d.get("close", [])],
-                        'volume': [float(x) for x in d.get("volume", [])]
+                        'open': opens,
+                        'high': highs,
+                        'low': lows,
+                        'close': closes,
+                        'volume': volumes
                     })
                     if len(df) >= 30:
                         return df
