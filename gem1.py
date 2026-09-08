@@ -46,33 +46,39 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ============================================================
-# MEXC FUTURES API VE STRATEJİ AYARLARI
+# MEXC FUTURES API VE 15 ADET COİN LİSTESİ
 # ============================================================
 MEXC_BASE_URL = "https://contract.mexc.com/api/v1/contract/kline"
+
 SYMBOLS = {
     "BTC_USDT": "BTC",
     "ETH_USDT": "ETH",
     "SOL_USDT": "SOL",
     "BNB_USDT": "BNB",
-    "AVAX_USDT": "AVAX",
-    "LINK_USDT": "LINK",
     "XRP_USDT": "XRP",
     "DOGE_USDT": "DOGE",
     "ADA_USDT": "ADA",
+    "AVAX_USDT": "AVAX",
+    "LINK_USDT": "LINK",
+    "NEAR_USDT": "NEAR",
     "DOT_USDT": "DOT",
+    "UNI_USDT": "UNI",
+    "ATOM_USDT": "ATOM",
+    "LTC_USDT": "LTC",
+    "FET_USDT": "FET",
 }
 
 TIMEFRAME = "Min15"
-LIMIT = 250
-LOOP_SECONDS = 60
+LOOP_SECONDS = 10                  # Kontrol döngü süresi
+TELEGRAM_NOTIFY_INTERVAL = 15 * 60 # 15 dakikada bir düzenli rapor
 
-STARTING_BALANCE_PER_COIN = 50.0
-MARGIN_PER_TRADE = 30.0
-LEVERAGE = 5.0
+STARTING_BALANCE_PER_COIN = 30.0
+MARGIN_PER_TRADE = 25.0
+LEVERAGE = 10.0
 POSITION_SIZE = MARGIN_PER_TRADE * LEVERAGE
 
 TAKE_PROFIT_PCT = 0.035
-STOP_LOSS_PCT = 0.025
+STOP_LOSS_PCT = 0.018
 COMMISSION_RATE = 0.0004
 
 STATE_FILE = "mexc_alfa_state.json"
@@ -108,7 +114,7 @@ def load_state():
 
 def send_telegram_msg(message, parse_mode="HTML"):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"[TELEGRAM UYARI] Token veya Chat ID eksik:\n{message}")
+        print(f"[TELEGRAM UYARI]:\n{message}")
         return False
     
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -125,8 +131,7 @@ def send_telegram_msg(message, parse_mode="HTML"):
         try:
             with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
                 return response.status == 200
-        except Exception as e:
-            print(f"Telegram gönderim hatası: {e}")
+        except:
             time.sleep(1)
     return False
 
@@ -137,7 +142,7 @@ def http_get_json(url, retries=2):
             req = Request(url, headers=headers)
             with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
                 return json.loads(response.read().decode("utf-8"))
-        except Exception:
+        except:
             time.sleep(1)
     return None
 
@@ -152,29 +157,28 @@ def analyze(symbol_tuple):
     symbol, name = symbol_tuple
     raw_data = get_klines(symbol)
     if not raw_data or len(raw_data) < 30:
-        return symbol, None, 50.0, 0.0
+        return symbol, None, 0.0, 50.0
     
     try:
-        # MEXC Futures kline verisi genellikle sözlük veya liste formatındadır
         closes = []
         for item in raw_data:
             if isinstance(item, dict) and "close" in item:
                 closes.append(float(item["close"]))
             elif isinstance(item, list) and len(item) > 2:
-                closes.append(float(item[2])) # Format detayına göre kapanış
+                closes.append(float(item[2]))
         
         if len(closes) < 20:
-            return symbol, None, 50.0, 0.0
+            return symbol, None, 0.0, 50.0
             
         current_price = closes[-1]
-        # Basit bir RSI ve Skorlama Örneği
-        return symbol, "BOŞ", current_price, 10.0
+        # Örnek simülasyon analizi (Buraya kendi SMC/strateji kodunuzu bağlayabilirsiniz)
+        return symbol, "BOŞ", current_price, 50.0
     except Exception as e:
         print(f"Analiz hatası ({symbol}): {e}")
-        return symbol, None, 50.0, 0.0
+        return symbol, None, 0.0, 50.0
 
 def main():
-    print("MEXC Alfa Trade Bot Başlatılıyor...")
+    print("MEXC 15 Coin Bot Başlatılıyor...")
     state = load_state()
     if state:
         positions = state.get("positions", {s: None for s in SYMBOLS})
@@ -187,17 +191,55 @@ def main():
         realized_pnl = {s: 0.0 for s in SYMBOLS}
         trade_number = 0
 
-    send_telegram_msg(f"🛡 <b>MEXC ALFA BAŞLANGIÇ RAPORU</b>\n🗓 Tarih: {now_date_text()}\n⚙️ Kaldıraç: {LEVERAGE}x")
+    # İlk Açılış Raporu
+    init_msg = (
+        f"🎯 <b>MEXC 15 COİN BOT BAŞLATILDI</b>\n"
+        f"🗓 Tarih: {now_date_text()}\n"
+        f"⚙️ Kaldıraç: {LEVERAGE}x | Teminat: {MARGIN_PER_TRADE} USDT\n"
+        f"📊 Takip Edilen Coin Sayısı: {len(SYMBOLS)}"
+    )
+    send_telegram_msg(init_msg)
+
+    last_report_time = time.time()
 
     while True:
         try:
             with ThreadPoolExecutor(max_workers=5) as executor:
                 results = list(executor.map(analyze, SYMBOLS.items()))
             
-            # Döngü içi işlemler burada yürütülür
+            analysis_dict = {r[0]: r[1:] for r in results}
+            
+            # Periyodik Rapor Kontrolü (15 dakikada bir)
+            current_time = time.time()
+            if current_time - last_report_time >= TELEGRAM_NOTIFY_INTERVAL:
+                active_count = sum(1 for p in positions.values() if p is not None)
+                total_cash = sum(wallet_balances.values())
+                
+                report_lines = [
+                    f"🎯 <b>MEXC 15 COİN PERİYODİK RAPORU</b>",
+                    f"🗓 Tarih: {now_date_text()}",
+                    f"⚙️ Kaldıraç: {LEVERAGE}x | Teminat: {MARGIN_PER_TRADE} USDT",
+                    f"📊 Açık Pozisyon Sayısı: {active_count} / {len(SYMBOLS)}",
+                    f"📋 <b>TÜM COİNLERİN DURUMU</b>",
+                    "━━━━━━━━━━━━━━━━━━━━━"
+                ]
+                
+                for symbol, name in SYMBOLS.items():
+                    signal, price, rsi = analysis_dict.get(symbol, ("BOŞ", 0.0, 50.0))
+                    wallet = wallet_balances.get(symbol, STARTING_BALANCE_PER_COIN)
+                    status = "⚪️ BOŞ" if not positions.get(symbol) else f"🟢 {positions[symbol]['side']}"
+                    report_lines.append(f"{status} {name}: {price} | 💵 {wallet:.2f}$")
+                
+                report_lines.append("━━━━━━━━━━━━━━━━━━━━━")
+                report_lines.append(f"💵 Toplam Varlık: {total_cash:.2f} USDT")
+                
+                send_telegram_msg("\n".join(report_lines))
+                last_report_time = current_time
+
             time.sleep(LOOP_SECONDS)
         except KeyboardInterrupt:
             print("Bot kapatılıyor...")
+            save_state(positions, wallet_balances, realized_pnl, trade_number)
             break
         except Exception as e:
             print(f"Döngü hatası: {e}")
