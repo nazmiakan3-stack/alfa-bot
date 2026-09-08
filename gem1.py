@@ -52,6 +52,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID", "")
 SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "13.5"))
 DB_FILE = os.getenv("DB_FILE", "mexc_alfa_state.json")
 
+# Düzenli rapor gönderme aralığı (Saniye cinsinden: 15 dakika = 900 saniye)
+ROUTINE_REPORT_INTERVAL = 900  
+
 # ============================================================
 # 15 ADET SEÇİLEN COİN LİSTESİ (MEXC Futures Formatı)
 # ============================================================
@@ -111,7 +114,7 @@ def send_telegram_msg(message):
         return False
 
 # ============================================================
-# MEXC FUTURES VERİ ÇEKME & PARSE ETME (GÜVENLİ HALE GETİRİLDİ)
+# MEXC FUTURES VERİ ÇEKME & PARSE ETME
 # ============================================================
 def get_klines_df(symbol):
     try:
@@ -130,7 +133,6 @@ def get_klines_df(symbol):
                     closes = [float(x) for x in d.get("close", [])]
                     volumes = [float(x) for x in vol_data]
 
-                    # Güvenlik Duvarı: En kısa dizi uzunluğuna göre hizala
                     min_len = min(len(opens), len(highs), len(lows), len(closes), len(volumes))
                     if min_len < 30:
                         return None
@@ -164,7 +166,6 @@ def calculate_smc_analysis(df):
     ma100 = pd.Series(closes).rolling(min(100, len(closes))).mean().iloc[-1]
     ma200 = pd.Series(closes).rolling(min(200, len(closes))).mean().iloc[-1]
     
-    # RSI Hesaplama (0'a Bölünme Korumalı)
     delta = pd.Series(closes).diff()
     gain = (delta.where(delta > 0, 0.0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
@@ -180,7 +181,7 @@ def calculate_smc_analysis(df):
         "bullish_ob": closes[-1] > closes[-2] and volumes[-1] > np.mean(volumes[-10:]) if len(volumes) >= 10 else False,
         "bearish_ob": closes[-1] < closes[-2] and volumes[-1] > np.mean(volumes[-10:]) if len(volumes) >= 10 else False,
         "bullish_bos": closes[-1] > np.max(highs[-15:-1]) if len(highs) >= 15 else False,
-        "bearish_bos": closes[-1] < np.min(lows[-15:-1]) if len(lows) >= 15 else False,
+        "bearish_bos": closes[-1] < np.min(lows[-15:-1]) if len(highs) >= 15 else False,
         "bullish_fvg": (highs[-2] < lows[-1]) if len(highs) >= 2 else False,
         "bearish_fvg": (lows[-2] > highs[-1]) if len(lows) >= 2 else False,
         "above_ma50": price > ma50,
@@ -267,6 +268,7 @@ def main():
 
     logging.info("MEXC Pro Alfa Trade Bot Başlatılıyor...")
     is_first_run = True
+    last_report_time = time.time()
 
     while True:
         try:
@@ -274,16 +276,13 @@ def main():
             total_unrealized_pnl = 0.0
             position_activity_detected = False
 
-            # Verileri paralel olarak çek ve analiz et
             with ThreadPoolExecutor(max_workers=5) as executor:
                 results = list(executor.map(analyze, SYMBOLS.items()))
 
             analysis_dict = {r[0]: r[1:] for r in results}
 
-            report_header = "🛡 <b>MEXC PRO ALFA BAŞLANGIÇ RAPORU</b>" if is_first_run else "🛡 <b>MEXC PRO ALFA TRADE RAPORU</b>"
-
             lines = [
-                report_header,
+                "🛡 <b>MEXC PRO ALFA TRADE RAPORU</b>",
                 f"🗓 <b>Tarih:</b> {now_date_text()}",
                 f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n",
                 "🪙 <b>COIN DURUMLARI</b>"
@@ -301,7 +300,6 @@ def main():
                 unrealized_pnl = 0.0
                 status_code = "BOŞ"
 
-                # İşlem Giriş Kontrolü
                 if pos is None and signal in ("LONG", "SHORT") and wallet >= MARGIN_PER_TRADE:
                     trade_number += 1
                     tp = current_price * (1 + TAKE_PROFIT_PCT) if signal == "LONG" else current_price * (1 - TAKE_PROFIT_PCT)
@@ -366,13 +364,22 @@ def main():
             lines.append(f"💰 <b>Realize K/Z:</b> {total_realized:+.2f} USDT")
 
             report_output = "\n".join(lines)
+            now_ts = time.time()
+            time_for_routine_report = (now_ts - last_report_time) >= ROUTINE_REPORT_INTERVAL
 
-            # İlk çalışmada canlı fiyatlı Başlangıç Raporu gönder, sonraki döngülerde hareket olunca gönder
+            # 1. Başlangıç Raporu
             if is_first_run:
-                send_telegram_msg(report_output)
+                send_telegram_msg("🛡 <b>MEXC PRO ALFA BAŞLANGIÇ RAPORU</b>\n\n" + "\n".join(lines[1:]))
                 is_first_run = False
+                last_report_time = now_ts
+            # 2. İşlem Hareketi Tespiti Raporu
             elif position_activity_detected:
                 send_telegram_msg("🚨 <b>PORTFÖY HAREKETİ TESPİT EDİLDİ!</b>\n\n" + report_output)
+                last_report_time = now_ts
+            # 3. Rutin 15 Dakikalık Rapor
+            elif time_for_routine_report:
+                send_telegram_msg("⏱ <b>PERİYODİK PORTFÖY RAPORU (15 DK)</b>\n\n" + report_output)
+                last_report_time = now_ts
 
             for event in trade_events:
                 send_telegram_msg(event)
