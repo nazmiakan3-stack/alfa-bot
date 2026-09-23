@@ -24,9 +24,10 @@ from telegram.constants import ParseMode
 TELEGRAM_BOT_TOKEN = "8680932537:AAHcV1npqk0H0MunNdvfchlurdEOfEaCgw4"
 TELEGRAM_CHAT_ID = "1734551753"
 
-LEVERAGE = 5
-NOTIONAL_USD = 10.0
-MARGIN_USD = 15.0
+LEVERAGE = 10
+NOTIONAL_USD = 100.0
+MARGIN_USD = 200.0
+VIRTUAL_BALANCE = 1000.0
 SCAN_INTERVAL_SECONDS = 60
 REPORT_INTERVAL_MINUTES = 60
 TIMEFRAME = "1m"
@@ -75,11 +76,15 @@ class PaperTrader:
         self.closed_positions: List[Position] = []
         self.total_pnl: float = 0.0
         self.trade_count: int = 0
+        self.balance: float = VIRTUAL_BALANCE  # Sanal 1000 USDT
 
     def open_position(self, symbol: str, side: str, entry_price: float, atr: float) -> Optional[Position]:
         if atr <= 0 or entry_price <= 0:
             return None
         if any(p.symbol == symbol and p.status == "OPEN" for p in self.positions):
+            return None
+        if self.balance < MARGIN_USD:
+            logger.warning(f"Yetersiz sanal bakiye: {self.balance:.2f} USDT")
             return None
 
         quantity = NOTIONAL_USD / entry_price
@@ -97,7 +102,8 @@ class PaperTrader:
         )
         self.positions.append(pos)
         self.trade_count += 1
-        logger.info(f"SANAL AÇILDI | {side} {symbol} | Giriş:{entry_price:.6f} TP:{tp:.6f} SL:{sl:.6f}")
+        self.balance -= MARGIN_USD  # Marjı bakiyeden düş
+        logger.info(f"SANAL AÇILDI | {side} {symbol} | 10x | 100$ | Marj:200$ | Bakiye:{self.balance:.2f}")
         return pos
 
     def update_positions(self, prices: Dict[str, float]) -> List[Position]:
@@ -129,9 +135,10 @@ class PaperTrader:
 
             if hit:
                 self.total_pnl += pos.pnl
+                self.balance += MARGIN_USD + pos.pnl  # Marjı + kar/zararı bakiyeye iade
                 self.closed_positions.append(pos)
                 closed_now.append(pos)
-                logger.info(f"SANAL KAPANDI | {pos.side} {pos.symbol} | PnL:{pos.pnl:+.4f} | {pos.status}")
+                logger.info(f"SANAL KAPANDI | {pos.side} {pos.symbol} | PnL:{pos.pnl:+.4f} | Bakiye:{self.balance:.2f} | {pos.status}")
             else:
                 still_open.append(pos)
 
@@ -146,6 +153,7 @@ class PaperTrader:
             "open_positions": len(self.get_open_positions()),
             "total_trades": self.trade_count,
             "total_pnl": round(self.total_pnl, 4),
+            "balance": round(self.balance, 2),
         }
 
 
@@ -270,7 +278,7 @@ class TelegramNotifier:
 
     async def send_startup(self):
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        await self.send(f"✅ <b>Peak Reversal Futures Bot aktif</b>\nSadece <b>XAGUSDT</b> taranıyor.\n<code>{now}</code>")
+        await self.send(f"✅ <b>Peak Reversal Futures Bot aktif</b>\nSadece <b>XAGUSDT</b> | Sanal Bakiye: 1000 USDT\n10x İzole | 100$ İşlem | 200$ Marj\n<code>{now}</code>")
 
     async def send_new_position(self, pos: Position):
         emoji = "🟢" if pos.side == "LONG" else "🔴"
@@ -278,7 +286,8 @@ class TelegramNotifier:
             f"{emoji} <b>Yeni Sanal İşlem</b>\n\n"
             f"Sembol: <code>{pos.symbol}</code>\nYön: <b>{pos.side}</b>\n"
             f"Giriş: <code>{pos.entry_price:.6f}</code>\nTP: <code>{pos.tp:.6f}</code>\nSL: <code>{pos.sl:.6f}</code>\n"
-            f"ATR: <code>{pos.atr:.6f}</code>\nNominal: {pos.notional} USDT | Kaldıraç: {pos.leverage}x"
+            f"ATR: <code>{pos.atr:.6f}</code>\n"
+            f"İşlem: 100 USDT | Marj: 200 USDT | Kaldıraç: 10x (İzole)"
         )
 
     async def send_closed(self, pos: Position):
@@ -290,10 +299,11 @@ class TelegramNotifier:
             f"PnL: <b>{pos.pnl:+.4f} USDT</b> | {pos.status}"
         )
 
-    async def send_hourly(self, scanned: int, new_trades: int, open_pos: List[Position], total_pnl: float, total_trades: int):
+    async def send_hourly(self, scanned: int, new_trades: int, open_pos: List[Position], total_pnl: float, total_trades: int, balance: float = 1000.0):
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         lines = [
             f"📊 <b>Saatlik Rapor</b> – {now}",
+            f"Sanal Bakiye: <b>{balance:.2f} USDT</b>",
             f"Toplam Tarama: <b>{scanned}</b> çift",
             f"Bu saatte açılan: <b>{new_trades}</b>",
             f"Aktif Pozisyon: <b>{len(open_pos)}</b>",
@@ -401,7 +411,8 @@ class PRFBBot:
                 await self.notifier.send_hourly(
                     self.last_scan_count, new,
                     self.trader.get_open_positions(),
-                    stats["total_pnl"], stats["total_trades"]
+                    stats["total_pnl"], stats["total_trades"],
+                    stats.get("balance", 1000.0)
                 )
             except Exception as e:
                 logger.error(f"Rapor hatası: {e}")
