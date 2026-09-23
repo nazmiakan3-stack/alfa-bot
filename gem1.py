@@ -10,6 +10,7 @@ import logging
 import os
 import signal
 import sys
+import io
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Literal
@@ -17,7 +18,11 @@ from typing import Dict, List, Optional, Literal
 import ccxt.async_support as ccxt
 import numpy as np
 import pandas as pd
-from telegram import Bot
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from telegram import Bot, InputFile
 from telegram.constants import ParseMode
 
 # ====================== AYARLAR ======================
@@ -258,6 +263,121 @@ def detect_signal(df: pd.DataFrame) -> Optional[str]:
     return None
 
 
+def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
+    """İşlem açıldığında tüm indikatörleri + TP/SL içeren grafik oluşturur"""
+    try:
+        # Son 80 mum göster
+        plot_df = df.tail(80).copy()
+        plot_df = plot_df.reset_index(drop=True)
+
+        fig = plt.figure(figsize=(12, 14), facecolor="#0e1117")
+        gs = fig.add_gridspec(6, 1, height_ratios=[3, 1, 1, 1, 1, 1], hspace=0.08)
+
+        # --- 1. Fiyat + EMA ---
+        ax1 = fig.add_subplot(gs[0])
+        ax1.set_facecolor("#0e1117")
+        for i in range(len(plot_df)):
+            color = "#26a69a" if plot_df["close"].iloc[i] >= plot_df["open"].iloc[i] else "#ef5350"
+            ax1.plot([i, i], [plot_df["low"].iloc[i], plot_df["high"].iloc[i]], color=color, linewidth=0.8)
+            ax1.plot([i, i], [plot_df["open"].iloc[i], plot_df["close"].iloc[i]], color=color, linewidth=2.2)
+
+        ax1.plot(plot_df["ema5"], color="#f0b90b", linewidth=1.2, label="EMA5")
+        ax1.plot(plot_df["ema20"], color="#e040fb", linewidth=1.2, label="EMA20")
+        ax1.plot(plot_df["ema99"], color="#7c4dff", linewidth=1.2, label="EMA99")
+
+        # Entry / TP / SL çizgileri
+        ax1.axhline(pos.entry_price, color="#2196f3", linestyle="--", linewidth=1.3, label=f"Giriş {pos.entry_price:.4f}")
+        ax1.axhline(pos.tp, color="#00e676", linestyle="-", linewidth=1.5, label=f"TP {pos.tp:.4f}")
+        ax1.axhline(pos.sl, color="#ff1744", linestyle="-", linewidth=1.5, label=f"SL {pos.sl:.4f}")
+
+        ax1.set_title(f"{pos.symbol}  |  {pos.side}  |  10x İzole  |  100$ İşlem", color="white", fontsize=13, pad=8)
+        ax1.legend(loc="upper left", fontsize=8, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        ax1.tick_params(colors="#aaa")
+        ax1.grid(True, alpha=0.15, color="#555")
+
+        # --- 2. KDJ ---
+        ax2 = fig.add_subplot(gs[1], sharex=ax1)
+        ax2.set_facecolor("#0e1117")
+        ax2.plot(plot_df["kdj_k"], color="#f0b90b", linewidth=1, label="K")
+        ax2.plot(plot_df["kdj_d"], color="#e040fb", linewidth=1, label="D")
+        ax2.plot(plot_df["kdj_j"], color="#26a69a", linewidth=1, label="J")
+        ax2.axhline(80, color="#555", linestyle="--", linewidth=0.7)
+        ax2.axhline(20, color="#555", linestyle="--", linewidth=0.7)
+        ax2.set_ylabel("KDJ", color="#aaa", fontsize=9)
+        ax2.tick_params(colors="#aaa")
+        ax2.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        ax2.grid(True, alpha=0.15)
+
+        # --- 3. StochRSI ---
+        ax3 = fig.add_subplot(gs[2], sharex=ax1)
+        ax3.set_facecolor("#0e1117")
+        ax3.plot(plot_df["stochrsi_k"], color="#f0b90b", linewidth=1, label="StochRSI")
+        ax3.plot(plot_df["stochrsi_d"], color="#e040fb", linewidth=1, label="MA")
+        ax3.axhline(80, color="#555", linestyle="--", linewidth=0.7)
+        ax3.axhline(20, color="#555", linestyle="--", linewidth=0.7)
+        ax3.set_ylabel("StochRSI", color="#aaa", fontsize=9)
+        ax3.tick_params(colors="#aaa")
+        ax3.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        ax3.grid(True, alpha=0.15)
+
+        # --- 4. MACD ---
+        ax4 = fig.add_subplot(gs[3], sharex=ax1)
+        ax4.set_facecolor("#0e1117")
+        ax4.plot(plot_df["macd_dif"], color="#26a69a", linewidth=1, label="DIF")
+        ax4.plot(plot_df["macd_dea"], color="#ef5350", linewidth=1, label="DEA")
+        colors = ["#26a69a" if v >= 0 else "#ef5350" for v in plot_df["macd_hist"]]
+        ax4.bar(range(len(plot_df)), plot_df["macd_hist"], color=colors, width=0.7, alpha=0.7)
+        ax4.axhline(0, color="#555", linewidth=0.7)
+        ax4.set_ylabel("MACD", color="#aaa", fontsize=9)
+        ax4.tick_params(colors="#aaa")
+        ax4.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        ax4.grid(True, alpha=0.15)
+
+        # --- 5. RSI ---
+        ax5 = fig.add_subplot(gs[4], sharex=ax1)
+        ax5.set_facecolor("#0e1117")
+        ax5.plot(plot_df["rsi6"], color="#f0b90b", linewidth=1, label="RSI6")
+        ax5.plot(plot_df["rsi14"], color="#e040fb", linewidth=1, label="RSI14")
+        ax5.axhline(70, color="#555", linestyle="--", linewidth=0.7)
+        ax5.axhline(30, color="#555", linestyle="--", linewidth=0.7)
+        ax5.set_ylabel("RSI", color="#aaa", fontsize=9)
+        ax5.tick_params(colors="#aaa")
+        ax5.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        ax5.grid(True, alpha=0.15)
+
+        # --- 6. Williams %R ---
+        ax6 = fig.add_subplot(gs[5], sharex=ax1)
+        ax6.set_facecolor("#0e1117")
+        ax6.plot(plot_df["williams_r"], color="#f0b90b", linewidth=1, label="Williams %R")
+        ax6.axhline(-20, color="#555", linestyle="--", linewidth=0.7)
+        ax6.axhline(-80, color="#555", linestyle="--", linewidth=0.7)
+        ax6.set_ylabel("Wm %R", color="#aaa", fontsize=9)
+        ax6.tick_params(colors="#aaa")
+        ax6.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        ax6.grid(True, alpha=0.15)
+
+        for ax in [ax1, ax2, ax3, ax4, ax5, ax6]:
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.spines["left"].set_color("#333")
+            ax.spines["bottom"].set_color("#333")
+
+        plt.setp(ax1.get_xticklabels(), visible=False)
+        plt.setp(ax2.get_xticklabels(), visible=False)
+        plt.setp(ax3.get_xticklabels(), visible=False)
+        plt.setp(ax4.get_xticklabels(), visible=False)
+        plt.setp(ax5.get_xticklabels(), visible=False)
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", dpi=120, bbox_inches="tight", facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        logger.error(f"Grafik oluşturma hatası: {e}")
+        return None
+
+
 # -------------------- Telegram --------------------
 class TelegramNotifier:
     def __init__(self):
@@ -280,15 +400,30 @@ class TelegramNotifier:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         await self.send(f"✅ <b>Peak Reversal Futures Bot aktif</b>\nSadece <b>XAGUSDT</b> | Sanal Bakiye: 1000 USDT\n10x İzole | 100$ İşlem | 200$ Marj\n<code>{now}</code>")
 
-    async def send_new_position(self, pos: Position):
+    async def send_new_position(self, pos: Position, chart_bytes: Optional[bytes] = None):
         emoji = "🟢" if pos.side == "LONG" else "🔴"
-        await self.send(
+        caption = (
             f"{emoji} <b>Yeni Sanal İşlem</b>\n\n"
             f"Sembol: <code>{pos.symbol}</code>\nYön: <b>{pos.side}</b>\n"
             f"Giriş: <code>{pos.entry_price:.6f}</code>\nTP: <code>{pos.tp:.6f}</code>\nSL: <code>{pos.sl:.6f}</code>\n"
             f"ATR: <code>{pos.atr:.6f}</code>\n"
             f"İşlem: 100 USDT | Marj: 200 USDT | Kaldıraç: 10x (İzole)"
         )
+        if not self.enabled:
+            return
+        try:
+            if chart_bytes:
+                await self.bot.send_photo(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    photo=InputFile(io.BytesIO(chart_bytes), filename="signal.png"),
+                    caption=caption,
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                await self.send(caption)
+        except Exception as e:
+            logger.error(f"Telegram grafik gönderme hatası: {e}")
+            await self.send(caption)
 
     async def send_closed(self, pos: Position):
         emoji = "✅" if pos.pnl >= 0 else "❌"
@@ -353,16 +488,16 @@ class PRFBBot:
             try:
                 ohlcv = await self.exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=150)
                 if not ohlcv:
-                    return symbol, None, 0.0, 0.0
+                    return symbol, None, 0.0, 0.0, None
                 df = calculate_indicators(ohlcv_to_df(ohlcv))
                 if df is None:
-                    return symbol, None, 0.0, 0.0
+                    return symbol, None, 0.0, 0.0, None
                 signal = detect_signal(df)
                 entry = float(df["close"].iloc[-1])
                 atr = float(df["atr"].iloc[-1]) if pd.notna(df["atr"].iloc[-1]) else 0.0
-                return symbol, signal, entry, atr
+                return symbol, signal, entry, atr, df
             except Exception:
-                return symbol, None, 0.0, 0.0
+                return symbol, None, 0.0, 0.0, None
 
     async def run_scan(self):
         if not self.symbols:
@@ -376,15 +511,16 @@ class PRFBBot:
         for res in results:
             if isinstance(res, Exception):
                 continue
-            symbol, signal, entry, atr = res
+            symbol, signal, entry, atr, df = res
             if entry > 0:
                 prices[symbol] = entry
-            if signal and atr > 0:
+            if signal and atr > 0 and df is not None:
                 pos = self.trader.open_position(symbol, signal, entry, atr)
                 if pos:
                     signals += 1
                     self.hourly_new_trades += 1
-                    await self.notifier.send_new_position(pos)
+                    chart = create_signal_chart(df, pos)
+                    await self.notifier.send_new_position(pos, chart)
 
         closed = self.trader.update_positions(prices)
         for pos in closed:
