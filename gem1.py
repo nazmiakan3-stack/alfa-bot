@@ -240,19 +240,27 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
 
 def check_peak_reversal(df: pd.DataFrame, idx: int) -> bool:
     """Aşırı alım (peak) dönüşü → SHORT sinyali
-    - EMA: Fiyat EMA5'i en tepede (son yükseklerin zirvesinde) aşağı kesmeli
-    - MACD: DIF, DEA'yı aşağı kesmeli ve bu kesişim kırmızı histogram çubuklarının en tepesinde olmalı
+    EMA: Fiyat EMA5'i 1 numaralı tepe tarzı noktada (lokal yüksek) aşağı kesmeli
     """
     if idx < 2:
         return False
     curr, prev = df.iloc[idx], df.iloc[idx - 1]
 
-    # EMA SHORT: kırmızı mum + close EMA5 altında + kesişim son high'ların en tepesinde
+    # EMA SHORT - 1 numaralı tepe tarzı:
+    # close EMA5'i aşağı kesiyor + mum kırmızı + lokal yüksekte
     ema_cross_down = prev["close"] >= prev["ema5"] and curr["close"] < curr["ema5"]
-    start_p = max(0, idx - 20)
+    start_p = max(0, idx - 15)
     recent_high = df["high"].iloc[start_p:idx + 1].max()
-    at_peak = curr["high"] >= recent_high * 0.998   # en tepeye çok yakın
-    cond1 = curr["close"] < curr["open"] and curr["close"] < curr["ema5"] and (ema_cross_down or at_peak)
+    # Tepeye yakınlık (işaretlediğin 1 numaralı tip)
+    at_peak = curr["high"] >= recent_high * 0.995
+    # Fiyat EMA20'nin de altında veya yakınında (düşüş teyidi)
+    below_ema20 = curr["close"] < curr["ema20"] * 1.002
+    cond1 = (
+        curr["close"] < curr["open"] and
+        curr["close"] < curr["ema5"] and
+        (ema_cross_down or at_peak) and
+        below_ema20
+    )
 
     kdj = (70 <= prev["kdj_j"] <= 110 or 70 <= prev["kdj_k"] <= 110) and \
           curr["kdj_j"] < prev["kdj_j"] and curr["kdj_k"] < prev["kdj_k"] and curr["kdj_d"] < prev["kdj_d"]
@@ -260,7 +268,7 @@ def check_peak_reversal(df: pd.DataFrame, idx: int) -> bool:
     rsi = prev["rsi6"] > prev["rsi14"] and curr["rsi6"] < curr["rsi14"] and 75 <= prev["rsi14"] <= 90
     will = -16 <= prev["williams_r"] <= 0 and curr["williams_r"] < prev["williams_r"]
 
-    # MACD SHORT: DIF DEA'yı aşağı kesiyor + kesişim kırmızı hist en tepesinde
+    # MACD SHORT
     cross_down = prev["macd_dif"] >= prev["macd_dea"] and curr["macd_dif"] < curr["macd_dea"]
     start_h = max(0, idx - MACD_HIST_LOOKBACK)
     recent_hist = df["macd_hist"].iloc[start_h:idx + 1]
@@ -280,19 +288,27 @@ def check_peak_reversal(df: pd.DataFrame, idx: int) -> bool:
 
 def check_trough_reversal(df: pd.DataFrame, idx: int) -> bool:
     """Aşırı satım (trough) dönüşü → LONG sinyali
-    - EMA: Fiyat EMA5'i en dipte (son low'ların dibinde) yukarı kesmeli
-    - MACD: DIF, DEA'yı yukarı kesmeli ve bu kesişim histogramın en yüksek noktasının ÜSTÜNDE olmalı
+    EMA: Fiyat EMA5'i 2 numaralı dip tarzı noktada (lokal düşük) yukarı kesmeli
     """
     if idx < 2:
         return False
     curr, prev = df.iloc[idx], df.iloc[idx - 1]
 
-    # EMA LONG: yeşil mum + close EMA5 üstünde + kesişim son low'ların en dibinde
+    # EMA LONG - 2 numaralı dip tarzı:
+    # close EMA5'i yukarı kesiyor + mum yeşil + lokal dipte
     ema_cross_up = prev["close"] <= prev["ema5"] and curr["close"] > curr["ema5"]
-    start_p = max(0, idx - 20)
+    start_p = max(0, idx - 15)
     recent_low = df["low"].iloc[start_p:idx + 1].min()
-    at_bottom = curr["low"] <= recent_low * 1.002   # en dibe çok yakın
-    cond1 = curr["close"] > curr["open"] and curr["close"] > curr["ema5"] and (ema_cross_up or at_bottom)
+    # Dibe yakınlık (işaretlediğin 2 numaralı tip)
+    at_bottom = curr["low"] <= recent_low * 1.005
+    # Fiyat EMA20'ye yaklaşmış veya üzerine çıkmış olabilir (toparlanma)
+    near_ema20 = curr["close"] > curr["ema20"] * 0.995
+    cond1 = (
+        curr["close"] > curr["open"] and
+        curr["close"] > curr["ema5"] and
+        (ema_cross_up or at_bottom) and
+        near_ema20
+    )
 
     kdj = (0 <= prev["kdj_j"] <= 30 or 0 <= prev["kdj_k"] <= 30) and \
           curr["kdj_j"] > prev["kdj_j"] and curr["kdj_k"] > prev["kdj_k"] and curr["kdj_d"] > prev["kdj_d"]
@@ -300,7 +316,7 @@ def check_trough_reversal(df: pd.DataFrame, idx: int) -> bool:
     rsi = prev["rsi6"] < prev["rsi14"] and curr["rsi6"] > curr["rsi14"] and 10 <= prev["rsi14"] <= 25
     will = -100 <= prev["williams_r"] <= -84 and curr["williams_r"] > prev["williams_r"]
 
-    # MACD LONG: DIF DEA'yı yukarı kesiyor + kesişim en yüksek hist noktasının ÜSTÜNDE
+    # MACD LONG
     cross_up = prev["macd_dif"] <= prev["macd_dea"] and curr["macd_dif"] > curr["macd_dea"]
     start_h = max(0, idx - MACD_HIST_LOOKBACK)
     recent_hist = df["macd_hist"].iloc[start_h:idx + 1]
