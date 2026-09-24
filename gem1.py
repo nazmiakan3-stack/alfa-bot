@@ -3,6 +3,12 @@
 Peak Reversal Futures Bot - TEK DOSYA VERSİYONU (gem1.py)
 Sadece XAGUSDT taranır.
 Contabo / Termius için optimize edilmiştir.
+
+Değişiklikler (2026-09-25):
+- Sinyal koşulları ±2 mum penceresinde (lookback=4) yeterli kabul edilir.
+- Peak (aşırı alım) → SHORT, Trough (aşırı satım) → LONG mantığı düzeltildi.
+- Her 5 dakikada bir tüm indikatörleri içeren grafik Telegram'a gönderilir.
+- Startup mesajında dosya adı yer alır.
 """
 
 import asyncio
@@ -35,6 +41,7 @@ MARGIN_USD = 200.0
 VIRTUAL_BALANCE = 1000.0
 SCAN_INTERVAL_SECONDS = 60
 REPORT_INTERVAL_MINUTES = 60
+CHART_INTERVAL_SECONDS = 300          # Her 5 dakikada indikatör grafiği
 TIMEFRAME = "1m"
 LOG_LEVEL = "INFO"
 
@@ -43,7 +50,7 @@ EMA_FAST, EMA_MID, EMA_SLOW = 5, 20, 99
 RSI_FAST, RSI_SLOW = 6, 14
 ATR_PERIOD = 14
 WILLIAMS_PERIOD = 14
-SIGNAL_LOOKBACK = 1
+SIGNAL_LOOKBACK = 4                   # ±2 mum penceresi (önceki + sonraki kapsar)
 # =====================================================
 
 # Logging
@@ -81,7 +88,7 @@ class PaperTrader:
         self.closed_positions: List[Position] = []
         self.total_pnl: float = 0.0
         self.trade_count: int = 0
-        self.balance: float = VIRTUAL_BALANCE  # Sanal 1000 USDT
+        self.balance: float = VIRTUAL_BALANCE
 
     def open_position(self, symbol: str, side: str, entry_price: float, atr: float) -> Optional[Position]:
         if atr <= 0 or entry_price <= 0:
@@ -107,7 +114,7 @@ class PaperTrader:
         )
         self.positions.append(pos)
         self.trade_count += 1
-        self.balance -= MARGIN_USD  # Marjı bakiyeden düş
+        self.balance -= MARGIN_USD
         logger.info(f"SANAL AÇILDI | {side} {symbol} | 10x | 100$ | Marj:200$ | Bakiye:{self.balance:.2f}")
         return pos
 
@@ -140,7 +147,7 @@ class PaperTrader:
 
             if hit:
                 self.total_pnl += pos.pnl
-                self.balance += MARGIN_USD + pos.pnl  # Marjı + kar/zararı bakiyeye iade
+                self.balance += MARGIN_USD + pos.pnl
                 self.closed_positions.append(pos)
                 closed_now.append(pos)
                 logger.info(f"SANAL KAPANDI | {pos.side} {pos.symbol} | PnL:{pos.pnl:+.4f} | Bakiye:{self.balance:.2f} | {pos.status}")
@@ -173,6 +180,7 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     if df is None or len(df) < 120:
         return None
     try:
+        df = df.copy()
         df["ema5"] = df["close"].ewm(span=EMA_FAST, adjust=False).mean()
         df["ema20"] = df["close"].ewm(span=EMA_MID, adjust=False).mean()
         df["ema99"] = df["close"].ewm(span=EMA_SLOW, adjust=False).mean()
@@ -224,10 +232,11 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         return None
 
 
-def check_long(df: pd.DataFrame, idx: int) -> bool:
+def check_peak_reversal(df: pd.DataFrame, idx: int) -> bool:
+    """Aşırı alım (peak) dönüşü → SHORT sinyali"""
     if idx < 2:
         return False
-    curr, prev = df.iloc[idx], df.iloc[idx-1]
+    curr, prev = df.iloc[idx], df.iloc[idx - 1]
     cond1 = curr["close"] < curr["open"] and curr["close"] < curr["ema5"]
     kdj = (70 <= prev["kdj_j"] <= 110 or 70 <= prev["kdj_k"] <= 110) and \
           curr["kdj_j"] < prev["kdj_j"] and curr["kdj_k"] < prev["kdj_k"] and curr["kdj_d"] < prev["kdj_d"]
@@ -238,10 +247,11 @@ def check_long(df: pd.DataFrame, idx: int) -> bool:
     return all([cond1, kdj, stoch, macd, rsi, will])
 
 
-def check_short(df: pd.DataFrame, idx: int) -> bool:
+def check_trough_reversal(df: pd.DataFrame, idx: int) -> bool:
+    """Aşırı satım (trough) dönüşü → LONG sinyali"""
     if idx < 2:
         return False
-    curr, prev = df.iloc[idx], df.iloc[idx-1]
+    curr, prev = df.iloc[idx], df.iloc[idx - 1]
     cond1 = curr["close"] > curr["open"] and curr["close"] > curr["ema5"]
     kdj = (0 <= prev["kdj_j"] <= 30 or 0 <= prev["kdj_k"] <= 30) and \
           curr["kdj_j"] > prev["kdj_j"] and curr["kdj_k"] > prev["kdj_k"] and curr["kdj_d"] > prev["kdj_d"]
@@ -253,29 +263,42 @@ def check_short(df: pd.DataFrame, idx: int) -> bool:
 
 
 def detect_signal(df: pd.DataFrame) -> Optional[str]:
+    """
+    Son SIGNAL_LOOKBACK+1 mum içinde (yaklaşık ±2 mum penceresi)
+    full koşul seti sağlanırsa sinyal üretir.
+    """
     if df is None or len(df) < 30:
         return None
-    for idx in range(len(df)-1, max(len(df)-1-SIGNAL_LOOKBACK-1, 1), -1):
-        if check_long(df, idx):
-            return "LONG"
-        if check_short(df, idx):
+    start = max(len(df) - 1 - SIGNAL_LOOKBACK, 2)
+    for idx in range(len(df) - 1, start - 1, -1):
+        if check_peak_reversal(df, idx):
             return "SHORT"
+        if check_trough_reversal(df, idx):
+            return "LONG"
     return None
 
 
+def _style_axes(ax):
+    ax.set_facecolor("#0e1117")
+    ax.tick_params(colors="#aaa")
+    ax.grid(True, alpha=0.15, color="#555")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#333")
+    ax.spines["bottom"].set_color("#333")
+
+
 def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
-    """İşlem açıldığında tüm indikatörleri + TP/SL içeren grafik oluşturur"""
+    """İşlem açıldığında tüm indikatörleri + TP/SL içeren grafik"""
     try:
-        # Son 80 mum göster
-        plot_df = df.tail(80).copy()
-        plot_df = plot_df.reset_index(drop=True)
+        plot_df = df.tail(80).copy().reset_index(drop=True)
 
         fig = plt.figure(figsize=(12, 14), facecolor="#0e1117")
         gs = fig.add_gridspec(6, 1, height_ratios=[3, 1, 1, 1, 1, 1], hspace=0.08)
 
-        # --- 1. Fiyat + EMA ---
+        # 1. Fiyat + EMA + Entry/TP/SL
         ax1 = fig.add_subplot(gs[0])
-        ax1.set_facecolor("#0e1117")
+        _style_axes(ax1)
         for i in range(len(plot_df)):
             color = "#26a69a" if plot_df["close"].iloc[i] >= plot_df["open"].iloc[i] else "#ef5350"
             ax1.plot([i, i], [plot_df["low"].iloc[i], plot_df["high"].iloc[i]], color=color, linewidth=0.8)
@@ -284,89 +307,65 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         ax1.plot(plot_df["ema5"], color="#f0b90b", linewidth=1.2, label="EMA5")
         ax1.plot(plot_df["ema20"], color="#e040fb", linewidth=1.2, label="EMA20")
         ax1.plot(plot_df["ema99"], color="#7c4dff", linewidth=1.2, label="EMA99")
-
-        # Entry / TP / SL çizgileri
         ax1.axhline(pos.entry_price, color="#2196f3", linestyle="--", linewidth=1.3, label=f"Giriş {pos.entry_price:.4f}")
         ax1.axhline(pos.tp, color="#00e676", linestyle="-", linewidth=1.5, label=f"TP {pos.tp:.4f}")
         ax1.axhline(pos.sl, color="#ff1744", linestyle="-", linewidth=1.5, label=f"SL {pos.sl:.4f}")
-
         ax1.set_title(f"{pos.symbol}  |  {pos.side}  |  10x İzole  |  100$ İşlem", color="white", fontsize=13, pad=8)
         ax1.legend(loc="upper left", fontsize=8, facecolor="#1e222d", edgecolor="none", labelcolor="white")
-        ax1.tick_params(colors="#aaa")
-        ax1.grid(True, alpha=0.15, color="#555")
 
-        # --- 2. KDJ ---
+        # 2. KDJ
         ax2 = fig.add_subplot(gs[1], sharex=ax1)
-        ax2.set_facecolor("#0e1117")
+        _style_axes(ax2)
         ax2.plot(plot_df["kdj_k"], color="#f0b90b", linewidth=1, label="K")
         ax2.plot(plot_df["kdj_d"], color="#e040fb", linewidth=1, label="D")
         ax2.plot(plot_df["kdj_j"], color="#26a69a", linewidth=1, label="J")
         ax2.axhline(80, color="#555", linestyle="--", linewidth=0.7)
         ax2.axhline(20, color="#555", linestyle="--", linewidth=0.7)
         ax2.set_ylabel("KDJ", color="#aaa", fontsize=9)
-        ax2.tick_params(colors="#aaa")
         ax2.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
-        ax2.grid(True, alpha=0.15)
 
-        # --- 3. StochRSI ---
+        # 3. StochRSI
         ax3 = fig.add_subplot(gs[2], sharex=ax1)
-        ax3.set_facecolor("#0e1117")
+        _style_axes(ax3)
         ax3.plot(plot_df["stochrsi_k"], color="#f0b90b", linewidth=1, label="StochRSI")
         ax3.plot(plot_df["stochrsi_d"], color="#e040fb", linewidth=1, label="MA")
         ax3.axhline(80, color="#555", linestyle="--", linewidth=0.7)
         ax3.axhline(20, color="#555", linestyle="--", linewidth=0.7)
         ax3.set_ylabel("StochRSI", color="#aaa", fontsize=9)
-        ax3.tick_params(colors="#aaa")
         ax3.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
-        ax3.grid(True, alpha=0.15)
 
-        # --- 4. MACD ---
+        # 4. MACD
         ax4 = fig.add_subplot(gs[3], sharex=ax1)
-        ax4.set_facecolor("#0e1117")
+        _style_axes(ax4)
         ax4.plot(plot_df["macd_dif"], color="#26a69a", linewidth=1, label="DIF")
         ax4.plot(plot_df["macd_dea"], color="#ef5350", linewidth=1, label="DEA")
         colors = ["#26a69a" if v >= 0 else "#ef5350" for v in plot_df["macd_hist"]]
         ax4.bar(range(len(plot_df)), plot_df["macd_hist"], color=colors, width=0.7, alpha=0.7)
         ax4.axhline(0, color="#555", linewidth=0.7)
         ax4.set_ylabel("MACD", color="#aaa", fontsize=9)
-        ax4.tick_params(colors="#aaa")
         ax4.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
-        ax4.grid(True, alpha=0.15)
 
-        # --- 5. RSI ---
+        # 5. RSI
         ax5 = fig.add_subplot(gs[4], sharex=ax1)
-        ax5.set_facecolor("#0e1117")
+        _style_axes(ax5)
         ax5.plot(plot_df["rsi6"], color="#f0b90b", linewidth=1, label="RSI6")
         ax5.plot(plot_df["rsi14"], color="#e040fb", linewidth=1, label="RSI14")
         ax5.axhline(70, color="#555", linestyle="--", linewidth=0.7)
         ax5.axhline(30, color="#555", linestyle="--", linewidth=0.7)
         ax5.set_ylabel("RSI", color="#aaa", fontsize=9)
-        ax5.tick_params(colors="#aaa")
         ax5.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
-        ax5.grid(True, alpha=0.15)
 
-        # --- 6. Williams %R ---
+        # 6. Williams %R
         ax6 = fig.add_subplot(gs[5], sharex=ax1)
-        ax6.set_facecolor("#0e1117")
+        _style_axes(ax6)
         ax6.plot(plot_df["williams_r"], color="#f0b90b", linewidth=1, label="Williams %R")
         ax6.axhline(-20, color="#555", linestyle="--", linewidth=0.7)
         ax6.axhline(-80, color="#555", linestyle="--", linewidth=0.7)
         ax6.set_ylabel("Wm %R", color="#aaa", fontsize=9)
-        ax6.tick_params(colors="#aaa")
         ax6.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
-        ax6.grid(True, alpha=0.15)
 
-        for ax in [ax1, ax2, ax3, ax4, ax5, ax6]:
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
-            ax.spines["left"].set_color("#333")
-            ax.spines["bottom"].set_color("#333")
-
-        plt.setp(ax1.get_xticklabels(), visible=False)
-        plt.setp(ax2.get_xticklabels(), visible=False)
-        plt.setp(ax3.get_xticklabels(), visible=False)
-        plt.setp(ax4.get_xticklabels(), visible=False)
-        plt.setp(ax5.get_xticklabels(), visible=False)
+        for ax in [ax1, ax2, ax3, ax4, ax5]:
+            plt.setp(ax.get_xticklabels(), visible=False)
 
         buf = io.BytesIO()
         plt.savefig(buf, format="png", dpi=120, bbox_inches="tight", facecolor=fig.get_facecolor())
@@ -374,7 +373,98 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         buf.seek(0)
         return buf.read()
     except Exception as e:
-        logger.error(f"Grafik oluşturma hatası: {e}")
+        logger.error(f"Sinyal grafik hatası: {e}")
+        return None
+
+
+def create_indicator_chart(df: pd.DataFrame, symbol: str) -> Optional[bytes]:
+    """Her 5 dakikada gönderilecek, tüm indikatörleri içeren genel grafik"""
+    try:
+        plot_df = df.tail(80).copy().reset_index(drop=True)
+        last_close = float(plot_df["close"].iloc[-1])
+        last_atr = float(plot_df["atr"].iloc[-1]) if pd.notna(plot_df["atr"].iloc[-1]) else 0.0
+
+        fig = plt.figure(figsize=(12, 14), facecolor="#0e1117")
+        gs = fig.add_gridspec(6, 1, height_ratios=[3, 1, 1, 1, 1, 1], hspace=0.08)
+
+        # 1. Fiyat + EMA
+        ax1 = fig.add_subplot(gs[0])
+        _style_axes(ax1)
+        for i in range(len(plot_df)):
+            color = "#26a69a" if plot_df["close"].iloc[i] >= plot_df["open"].iloc[i] else "#ef5350"
+            ax1.plot([i, i], [plot_df["low"].iloc[i], plot_df["high"].iloc[i]], color=color, linewidth=0.8)
+            ax1.plot([i, i], [plot_df["open"].iloc[i], plot_df["close"].iloc[i]], color=color, linewidth=2.2)
+
+        ax1.plot(plot_df["ema5"], color="#f0b90b", linewidth=1.2, label="EMA5")
+        ax1.plot(plot_df["ema20"], color="#e040fb", linewidth=1.2, label="EMA20")
+        ax1.plot(plot_df["ema99"], color="#7c4dff", linewidth=1.2, label="EMA99")
+        ax1.set_title(
+            f"{symbol}  |  Fiyat: {last_close:.4f}  |  ATR: {last_atr:.4f}  |  5dk İndikatör",
+            color="white", fontsize=13, pad=8
+        )
+        ax1.legend(loc="upper left", fontsize=8, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+
+        # 2. KDJ
+        ax2 = fig.add_subplot(gs[1], sharex=ax1)
+        _style_axes(ax2)
+        ax2.plot(plot_df["kdj_k"], color="#f0b90b", linewidth=1, label="K")
+        ax2.plot(plot_df["kdj_d"], color="#e040fb", linewidth=1, label="D")
+        ax2.plot(plot_df["kdj_j"], color="#26a69a", linewidth=1, label="J")
+        ax2.axhline(80, color="#555", linestyle="--", linewidth=0.7)
+        ax2.axhline(20, color="#555", linestyle="--", linewidth=0.7)
+        ax2.set_ylabel("KDJ", color="#aaa", fontsize=9)
+        ax2.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+
+        # 3. StochRSI
+        ax3 = fig.add_subplot(gs[2], sharex=ax1)
+        _style_axes(ax3)
+        ax3.plot(plot_df["stochrsi_k"], color="#f0b90b", linewidth=1, label="StochRSI")
+        ax3.plot(plot_df["stochrsi_d"], color="#e040fb", linewidth=1, label="MA")
+        ax3.axhline(80, color="#555", linestyle="--", linewidth=0.7)
+        ax3.axhline(20, color="#555", linestyle="--", linewidth=0.7)
+        ax3.set_ylabel("StochRSI", color="#aaa", fontsize=9)
+        ax3.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+
+        # 4. MACD
+        ax4 = fig.add_subplot(gs[3], sharex=ax1)
+        _style_axes(ax4)
+        ax4.plot(plot_df["macd_dif"], color="#26a69a", linewidth=1, label="DIF")
+        ax4.plot(plot_df["macd_dea"], color="#ef5350", linewidth=1, label="DEA")
+        colors = ["#26a69a" if v >= 0 else "#ef5350" for v in plot_df["macd_hist"]]
+        ax4.bar(range(len(plot_df)), plot_df["macd_hist"], color=colors, width=0.7, alpha=0.7)
+        ax4.axhline(0, color="#555", linewidth=0.7)
+        ax4.set_ylabel("MACD", color="#aaa", fontsize=9)
+        ax4.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+
+        # 5. RSI
+        ax5 = fig.add_subplot(gs[4], sharex=ax1)
+        _style_axes(ax5)
+        ax5.plot(plot_df["rsi6"], color="#f0b90b", linewidth=1, label="RSI6")
+        ax5.plot(plot_df["rsi14"], color="#e040fb", linewidth=1, label="RSI14")
+        ax5.axhline(70, color="#555", linestyle="--", linewidth=0.7)
+        ax5.axhline(30, color="#555", linestyle="--", linewidth=0.7)
+        ax5.set_ylabel("RSI", color="#aaa", fontsize=9)
+        ax5.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+
+        # 6. Williams %R
+        ax6 = fig.add_subplot(gs[5], sharex=ax1)
+        _style_axes(ax6)
+        ax6.plot(plot_df["williams_r"], color="#f0b90b", linewidth=1, label="Williams %R")
+        ax6.axhline(-20, color="#555", linestyle="--", linewidth=0.7)
+        ax6.axhline(-80, color="#555", linestyle="--", linewidth=0.7)
+        ax6.set_ylabel("Wm %R", color="#aaa", fontsize=9)
+        ax6.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+
+        for ax in [ax1, ax2, ax3, ax4, ax5]:
+            plt.setp(ax.get_xticklabels(), visible=False)
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", dpi=120, bbox_inches="tight", facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        logger.error(f"İndikatör grafik hatası: {e}")
         return None
 
 
@@ -398,7 +488,14 @@ class TelegramNotifier:
 
     async def send_startup(self):
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        await self.send(f"✅ <b>Peak Reversal Futures Bot aktif</b>\nSadece <b>XAGUSDT</b> | Sanal Bakiye: 1000 USDT\n10x İzole | 100$ İşlem | 200$ Marj\n<code>{now}</code>")
+        await self.send(
+            f"✅ <b>Peak Reversal Futures Bot aktif</b>\n"
+            f"📁 Dosya: <code>gem1.py</code>\n"
+            f"Sadece <b>XAGUSDT</b> | Sanal Bakiye: 1000 USDT\n"
+            f"10x İzole | 100$ İşlem | 200$ Marj\n"
+            f"Sinyal penceresi: ±2 mum | 5dk grafik aktif\n"
+            f"<code>{now}</code>"
+        )
 
     async def send_new_position(self, pos: Position, chart_bytes: Optional[bytes] = None):
         emoji = "🟢" if pos.side == "LONG" else "🔴"
@@ -454,6 +551,25 @@ class TelegramNotifier:
             lines.append("Açık işlem yok.")
         await self.send("\n".join(lines))
 
+    async def send_indicator_chart(self, chart_bytes: bytes, symbol: str, price: float):
+        if not self.enabled or not chart_bytes:
+            return
+        caption = (
+            f"📈 <b>5 Dakikalık İndikatör Grafiği</b>\n"
+            f"Sembol: <code>{symbol}</code>\n"
+            f"Fiyat: <code>{price:.4f}</code>\n"
+            f"EMA5 / EMA20 / EMA99 | KDJ | StochRSI | MACD | RSI | Williams %R"
+        )
+        try:
+            await self.bot.send_photo(
+                chat_id=TELEGRAM_CHAT_ID,
+                photo=InputFile(io.BytesIO(chart_bytes), filename="indicators.png"),
+                caption=caption,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logger.error(f"5dk grafik gönderme hatası: {e}")
+
 
 # -------------------- Ana Bot --------------------
 class PRFBBot:
@@ -471,7 +587,6 @@ class PRFBBot:
         self.sem = asyncio.Semaphore(5)
 
     async def load_markets(self):
-        # Sadece XAGUSDT taranacak
         await self.exchange.load_markets()
         candidates = ["XAG/USDT:USDT", "XAGUSDT", "XAG/USDT"]
         self.symbols = []
@@ -496,7 +611,8 @@ class PRFBBot:
                 entry = float(df["close"].iloc[-1])
                 atr = float(df["atr"].iloc[-1]) if pd.notna(df["atr"].iloc[-1]) else 0.0
                 return symbol, signal, entry, atr, df
-            except Exception:
+            except Exception as e:
+                logger.error(f"scan_symbol hata ({symbol}): {e}")
                 return symbol, None, 0.0, 0.0, None
 
     async def run_scan(self):
@@ -554,13 +670,36 @@ class PRFBBot:
                 logger.error(f"Rapor hatası: {e}")
             await asyncio.sleep(REPORT_INTERVAL_MINUTES * 60)
 
+    async def chart_loop(self):
+        """Her 5 dakikada bir XAGUSDT indikatör grafiği gönderir"""
+        await asyncio.sleep(10)  # startup sonrası kısa bekleme
+        while self.running:
+            try:
+                if not self.symbols:
+                    await asyncio.sleep(CHART_INTERVAL_SECONDS)
+                    continue
+                symbol = self.symbols[0]
+                _, _, entry, _, df = await self.scan_symbol(symbol)
+                if df is not None and entry > 0:
+                    chart = create_indicator_chart(df, symbol)
+                    if chart:
+                        await self.notifier.send_indicator_chart(chart, symbol, entry)
+                        logger.info(f"5dk indikatör grafiği gönderildi | {symbol} @ {entry:.4f}")
+            except Exception as e:
+                logger.error(f"5dk grafik hatası: {e}")
+            await asyncio.sleep(CHART_INTERVAL_SECONDS)
+
     async def start(self):
         logger.info("=" * 50)
-        logger.info("Peak Reversal Futures Bot başlatılıyor...")
+        logger.info("Peak Reversal Futures Bot başlatılıyor... (gem1.py)")
         await self.load_markets()
         await self.notifier.send_startup()
         self.running = True
-        await asyncio.gather(self.scan_loop(), self.report_loop())
+        await asyncio.gather(
+            self.scan_loop(),
+            self.report_loop(),
+            self.chart_loop()
+        )
 
     async def stop(self):
         self.running = False
