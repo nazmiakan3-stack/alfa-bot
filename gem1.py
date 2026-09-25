@@ -5,13 +5,17 @@ Sadece XAGUSDT taranır.
 Contabo / Termius için optimize edilmiştir.
 
 Güncel Mantık (2026-09-26):
-- LONG  (mavi yığın): İndikatörler oversold + dönüş (KDJ/StochRSI/MACD/RSI/Williams)
-          + fiyat lokal dipte + EMA5 ≤ EMA20 civarı + EMA99 sert düşüş değil.
-- SHORT (kırmızı yığın): İndikatörler overbought + dönüş
-          + fiyat lokal tepede + EMA5 ≥ EMA20 civarı + EMA99 sert yükseliş değil.
-- Çıkış : TP/SL veya EMA5/EMA20 ters kesişim.
-- SL = 1.5 × ATR | TP = 2 × ATR
-- Grafik: 15m, ~1 gün, mavi/kırmızı dikey kesik çizgiler + giriş/TP/SL.
+LONG:
+  - EMA5 en düşük noktada + dolmaya başlamış (EMA20 kesişimi YOK)
+  - KDJ 0-20 | StochRSI 0-30 | RSI 0-30
+  - MACD: DIF aşağıdan yukarı DEA kesiyor
+  - Williams %R: -100 ile -70 arası
+SHORT:
+  - EMA5 en yüksek noktada + düşmeye başlamış
+  - KDJ 80-100 | StochRSI 70-100 | RSI 70-100
+  - MACD: DIF yukarıdan aşağı DEA kesiyor
+  - Williams %R: -30 ile 0 arası
+Çıkış: TP/SL veya EMA5/EMA20 ters kesişim | SL=1.5ATR | TP=2ATR
 """
 
 import asyncio
@@ -255,112 +259,73 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
 
 
 # -------------------- Signal Logic (mavi/kırmızı noktalara göre) --------------------
-def _indicators_long_ok(df: pd.DataFrame, idx: int) -> bool:
-    """
-    LONG (mavi): Aşırı satım + yukarı dönüş
-    KDJ < 25, StochRSI < 20, RSI < 35, Williams < -80, MACD dip/yukarı
-    En az 4 indikatör şartı
-    """
-    if idx < 2:
-        return False
-    curr, prev = df.iloc[idx], df.iloc[idx - 1]
-
-    kdj_ok = (prev["kdj_j"] < 25 or prev["kdj_k"] < 25) and \
-             curr["kdj_j"] > prev["kdj_j"] and curr["kdj_k"] >= prev["kdj_k"]
-
-    stoch_ok = prev["stochrsi_k"] < 20 and curr["stochrsi_k"] > prev["stochrsi_k"]
-
-    macd_ok = (prev["macd_hist"] <= 0 and curr["macd_hist"] > prev["macd_hist"]) or \
-              (prev["macd_dif"] <= prev["macd_dea"] and curr["macd_dif"] > curr["macd_dea"])
-
-    rsi_ok = prev["rsi14"] < 35 and curr["rsi6"] > prev["rsi6"] and curr["rsi14"] <= 40
-
-    will_ok = prev["williams_r"] < -80 and curr["williams_r"] > prev["williams_r"]
-
-    score = sum([kdj_ok, stoch_ok, macd_ok, rsi_ok, will_ok])
-    return score >= 4
-
-
-def _indicators_short_ok(df: pd.DataFrame, idx: int) -> bool:
-    """
-    SHORT (kırmızı): Aşırı alım + aşağı dönüş
-    KDJ > 75, StochRSI > 80, RSI > 65, Williams > -20, MACD tepe/aşağı
-    En az 4 indikatör şartı
-    """
-    if idx < 2:
-        return False
-    curr, prev = df.iloc[idx], df.iloc[idx - 1]
-
-    kdj_ok = (prev["kdj_j"] > 75 or prev["kdj_k"] > 75) and \
-             curr["kdj_j"] < prev["kdj_j"] and curr["kdj_k"] <= prev["kdj_k"]
-
-    stoch_ok = prev["stochrsi_k"] > 80 and curr["stochrsi_k"] < prev["stochrsi_k"]
-
-    macd_ok = (prev["macd_hist"] >= 0 and curr["macd_hist"] < prev["macd_hist"]) or \
-              (prev["macd_dif"] >= prev["macd_dea"] and curr["macd_dif"] < curr["macd_dea"])
-
-    rsi_ok = prev["rsi14"] > 65 and curr["rsi6"] < prev["rsi6"] and curr["rsi14"] >= 60
-
-    will_ok = prev["williams_r"] > -20 and curr["williams_r"] < prev["williams_r"]
-
-    score = sum([kdj_ok, stoch_ok, macd_ok, rsi_ok, will_ok])
-    return score >= 4
-
-
 def check_long(df: pd.DataFrame, idx: int) -> bool:
     """
-    LONG (mavi noktalar):
-    - İndikatörler AŞIRI SATIM + yukarı dönüş (en az 4)
-    - Fiyat lokal dipte
-    - EMA5 alttan EMA20 kesiyor VEYA hemen altında
-    - EMA99 sert düşüşte değil
+    LONG şartları (kullanıcı tanımı):
+    - EMA5, EMA20'yi KESMEZ → EMA5 en düşük noktada olmalı ve oradan dolmaya başlamalı
+    - KDJ 0-20 arasında
+    - StochRSI 0-30 arasında
+    - MACD: DIF aşağıdan yukarı DEA'yı kesmeli
+    - Williams %R (VM14): -100 ile -70 arasında
+    - RSI 0-30 arasında
     """
     if idx < 3:
         return False
     curr, prev = df.iloc[idx], df.iloc[idx - 1]
 
-    if not _indicators_long_ok(df, idx):
-        return False
+    # 1) EMA5 en düşük noktada + dolmaya başlamış (EMA20 kesişimi YOK)
+    start_e = max(0, idx - 12)
+    ema5_min = df["ema5"].iloc[start_e:idx + 1].min()
+    ema5_at_low = curr["ema5"] <= ema5_min * 1.002
+    ema5_rising = curr["ema5"] > prev["ema5"]
+    ema_ok = ema5_at_low and ema5_rising
 
-    start_p = max(0, idx - 15)
-    recent_low = df["low"].iloc[start_p:idx + 1].min()
-    at_bottom = curr["low"] <= recent_low * 1.006
+    # 2) KDJ 0-20
+    kdj_ok = 0 <= curr["kdj_k"] <= 20 or 0 <= curr["kdj_j"] <= 20
 
-    ema_cross_up = prev["ema5"] <= prev["ema20"] and curr["ema5"] > curr["ema20"]
-    ema_near_below = curr["ema5"] <= curr["ema20"] * 1.002
-    ema_ok = ema_cross_up or ema_near_below
+    # 3) StochRSI 0-30
+    stoch_ok = 0 <= curr["stochrsi_k"] <= 30
 
-    ema99_ok = curr["ema99_slope"] >= -0.015
+    # 4) MACD: DIF aşağıdan yukarı DEA kesiyor
+    macd_ok = prev["macd_dif"] <= prev["macd_dea"] and curr["macd_dif"] > curr["macd_dea"]
 
-    return at_bottom and ema_ok and ema99_ok
+    # 5) Williams %R -100 ile -70 arası
+    will_ok = -100 <= curr["williams_r"] <= -70
+
+    # 6) RSI 0-30
+    rsi_ok = 0 <= curr["rsi14"] <= 30 or 0 <= curr["rsi6"] <= 30
+
+    return all([ema_ok, kdj_ok, stoch_ok, macd_ok, will_ok, rsi_ok])
 
 
 def check_short(df: pd.DataFrame, idx: int) -> bool:
     """
-    SHORT (kırmızı noktalar):
-    - İndikatörler AŞIRI ALIM + aşağı dönüş (en az 4)
-    - Fiyat lokal tepede (EMA5 tepe bölgesi)
-    - EMA5 üstten EMA20 kesiyor VEYA hemen üstünde
-    - EMA99 sert yükselişte değil
+    SHORT (ters mantık – tepe):
+    - EMA5 en yüksek noktada + düşmeye başlamış
+    - KDJ 80-100
+    - StochRSI 70-100
+    - MACD: DIF yukarıdan aşağı DEA kesiyor
+    - Williams %R -30 ile 0 arası
+    - RSI 70-100
     """
     if idx < 3:
         return False
     curr, prev = df.iloc[idx], df.iloc[idx - 1]
 
-    if not _indicators_short_ok(df, idx):
-        return False
+    # EMA5 en yüksek noktada + düşmeye başlamış
+    start_e = max(0, idx - 12)
+    ema5_max = df["ema5"].iloc[start_e:idx + 1].max()
+    ema5_at_high = curr["ema5"] >= ema5_max * 0.998
+    ema5_falling = curr["ema5"] < prev["ema5"]
+    ema_ok = ema5_at_high and ema5_falling
 
-    start_p = max(0, idx - 15)
-    recent_high = df["high"].iloc[start_p:idx + 1].max()
-    at_peak = curr["high"] >= recent_high * 0.994
+    kdj_ok = 80 <= curr["kdj_k"] <= 100 or 80 <= curr["kdj_j"] <= 100
+    stoch_ok = 70 <= curr["stochrsi_k"] <= 100
+    macd_ok = prev["macd_dif"] >= prev["macd_dea"] and curr["macd_dif"] < curr["macd_dea"]
+    will_ok = -30 <= curr["williams_r"] <= 0
+    rsi_ok = 70 <= curr["rsi14"] <= 100 or 70 <= curr["rsi6"] <= 100
 
-    ema_cross_down = prev["ema5"] >= prev["ema20"] and curr["ema5"] < curr["ema20"]
-    ema_near_above = curr["ema5"] >= curr["ema20"] * 0.998
-    ema_ok = ema_cross_down or ema_near_above
-
-    ema99_ok = curr["ema99_slope"] <= 0.015
-
-    return at_peak and ema_ok and ema99_ok
+    return all([ema_ok, kdj_ok, stoch_ok, macd_ok, will_ok, rsi_ok])
 
 
 def detect_signal(df: pd.DataFrame) -> Optional[str]:
@@ -612,8 +577,8 @@ class TelegramNotifier:
             f"Sadece <b>XAGUSDT</b> | Sanal Bakiye: 1000 USDT\n"
             f"10x İzole | 100$ İşlem | 200$ Marj\n"
             f"Timeframe: <b>15m</b>\n"
-            f"LONG (mavi): İndikatörler dip+dönüş + lokal dip + EMA5≤EMA20\n"
-            f"SHORT (kırmızı): İndikatörler tepe+dönüş + lokal tepe + EMA5≥EMA20\n"
+            f"LONG: EMA5 dip+doluyor | KDJ0-20 | Stoch0-30 | RSI0-30 | MACD↑ | Wm-100/-70\n"
+            f"SHORT: EMA5 tepe+düşüyor | KDJ80-100 | Stoch70-100 | RSI70-100 | MACD↓ | Wm-30/0\n"
             f"SL = 1.5×ATR | TP = 2×ATR | Ters EMA kesişimde kapanır\n"
             f"<code>{now}</code>"
         )
