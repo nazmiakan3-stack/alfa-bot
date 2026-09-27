@@ -258,80 +258,159 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         return None
 
 
-# -------------------- Signal Logic (mavi/kırmızı noktalara göre) --------------------
+# -------------------- Signal Logic --------------------
+# Ana tetik: EMA5 tepe/dip
+# Diğer indikatörler ±2 mum içinde şartı sağlarsa pozisyon açılır
+
+def _ema5_at_bottom(df: pd.DataFrame, idx: int) -> bool:
+    """EMA5 lokal dip + yukarı dönüş (canlı mumda gelecek bar aranmaz)"""
+    if idx < 3:
+        return False
+    e = df["ema5"]
+    start = max(0, idx - 8)
+    at_low = e.iloc[idx] <= e.iloc[start:idx + 1].min() * 1.001
+    rising = e.iloc[idx] >= e.iloc[idx - 1]
+    # Pivot: önceki 2 mumdan düşük
+    is_pivot = e.iloc[idx] <= e.iloc[idx - 1] and e.iloc[idx] <= e.iloc[idx - 2]
+    if idx < len(df) - 1:
+        is_pivot = is_pivot and e.iloc[idx] <= e.iloc[idx + 1]
+    return (is_pivot and rising) or (at_low and rising)
+
+
+def _ema5_at_top(df: pd.DataFrame, idx: int) -> bool:
+    """EMA5 lokal tepe + aşağı dönüş (canlı mumda gelecek bar aranmaz)"""
+    if idx < 3:
+        return False
+    e = df["ema5"]
+    start = max(0, idx - 8)
+    at_high = e.iloc[idx] >= e.iloc[start:idx + 1].max() * 0.999
+    falling = e.iloc[idx] <= e.iloc[idx - 1]
+    is_pivot = e.iloc[idx] >= e.iloc[idx - 1] and e.iloc[idx] >= e.iloc[idx - 2]
+    if idx < len(df) - 1:
+        is_pivot = is_pivot and e.iloc[idx] >= e.iloc[idx + 1]
+    return (is_pivot and falling) or (at_high and falling)
+
+
+def _kdj_long_ok(row) -> bool:
+    return (0 <= row["kdj_k"] <= 25) or (0 <= row["kdj_j"] <= 25)
+
+
+def _kdj_short_ok(row) -> bool:
+    return (75 <= row["kdj_k"] <= 100) or (75 <= row["kdj_j"] <= 100)
+
+
+def _stoch_long_ok(row) -> bool:
+    return 0 <= row["stochrsi_k"] <= 35
+
+
+def _stoch_short_ok(row) -> bool:
+    return 65 <= row["stochrsi_k"] <= 100
+
+
+def _rsi_long_ok(row) -> bool:
+    return (0 <= row["rsi14"] <= 35) or (0 <= row["rsi6"] <= 35)
+
+
+def _rsi_short_ok(row) -> bool:
+    return (65 <= row["rsi14"] <= 100) or (65 <= row["rsi6"] <= 100)
+
+
+def _will_long_ok(row) -> bool:
+    return -100 <= row["williams_r"] <= -65
+
+
+def _will_short_ok(row) -> bool:
+    return -35 <= row["williams_r"] <= 0
+
+
+def _macd_long_ok(df: pd.DataFrame, idx: int) -> bool:
+    """DIF aşağıdan yukarı DEA kesiyor (bu mum veya 1-2 önceki)"""
+    for j in range(max(1, idx - 2), idx + 1):
+        if j < 1:
+            continue
+        c, p = df.iloc[j], df.iloc[j - 1]
+        if p["macd_dif"] <= p["macd_dea"] and c["macd_dif"] > c["macd_dea"]:
+            return True
+        # hist negatiften pozitife / yükseliyor
+        if c["macd_hist"] > p["macd_hist"] and p["macd_hist"] <= 0.02:
+            return True
+    return False
+
+
+def _macd_short_ok(df: pd.DataFrame, idx: int) -> bool:
+    for j in range(max(1, idx - 2), idx + 1):
+        if j < 1:
+            continue
+        c, p = df.iloc[j], df.iloc[j - 1]
+        if p["macd_dif"] >= p["macd_dea"] and c["macd_dif"] < c["macd_dea"]:
+            return True
+        if c["macd_hist"] < p["macd_hist"] and p["macd_hist"] >= -0.02:
+            return True
+    return False
+
+
+def _any_in_window(df: pd.DataFrame, idx: int, check_fn, window: int = 2) -> bool:
+    """±window mum içinde check_fn True ise OK"""
+    for j in range(max(0, idx - window), min(len(df), idx + window + 1)):
+        if check_fn(df.iloc[j]):
+            return True
+    return False
+
+
 def check_long(df: pd.DataFrame, idx: int) -> bool:
     """
-    LONG şartları (kullanıcı tanımı):
-    - EMA5, EMA20'yi KESMEZ → EMA5 en düşük noktada olmalı ve oradan dolmaya başlamalı
-    - KDJ 0-20 arasında
-    - StochRSI 0-30 arasında
-    - MACD: DIF aşağıdan yukarı DEA'yı kesmeli
-    - Williams %R (VM14): -100 ile -70 arasında
-    - RSI 0-30 arasında
+    LONG:
+    1) EMA5 en dipte + dolmaya başlamış (ana tetik)
+    2) KDJ 0-25, StochRSI 0-35, RSI 0-35, Williams -100/-65
+       → bunlar ±2 mum içinde sağlanabilir
+    3) MACD DIF↑DEA veya hist yukarı (±2 mum)
     """
     if idx < 3:
         return False
-    curr, prev = df.iloc[idx], df.iloc[idx - 1]
 
-    # 1) EMA5 en düşük noktada + dolmaya başlamış (EMA20 kesişimi YOK)
-    start_e = max(0, idx - 12)
-    ema5_min = df["ema5"].iloc[start_e:idx + 1].min()
-    ema5_at_low = curr["ema5"] <= ema5_min * 1.002
-    ema5_rising = curr["ema5"] > prev["ema5"]
-    ema_ok = ema5_at_low and ema5_rising
+    if not _ema5_at_bottom(df, idx):
+        return False
 
-    # 2) KDJ 0-20
-    kdj_ok = 0 <= curr["kdj_k"] <= 20 or 0 <= curr["kdj_j"] <= 20
+    kdj_ok = _any_in_window(df, idx, _kdj_long_ok, 2)
+    stoch_ok = _any_in_window(df, idx, _stoch_long_ok, 2)
+    rsi_ok = _any_in_window(df, idx, _rsi_long_ok, 2)
+    will_ok = _any_in_window(df, idx, _will_long_ok, 2)
+    macd_ok = _macd_long_ok(df, idx)
 
-    # 3) StochRSI 0-30
-    stoch_ok = 0 <= curr["stochrsi_k"] <= 30
-
-    # 4) MACD: DIF aşağıdan yukarı DEA kesiyor
-    macd_ok = prev["macd_dif"] <= prev["macd_dea"] and curr["macd_dif"] > curr["macd_dea"]
-
-    # 5) Williams %R -100 ile -70 arası
-    will_ok = -100 <= curr["williams_r"] <= -70
-
-    # 6) RSI 0-30
-    rsi_ok = 0 <= curr["rsi14"] <= 30 or 0 <= curr["rsi6"] <= 30
-
-    return all([ema_ok, kdj_ok, stoch_ok, macd_ok, will_ok, rsi_ok])
+    # En az 3 yan şart + MACD (toplam esnek ama anlamlı)
+    side_score = sum([kdj_ok, stoch_ok, rsi_ok, will_ok, macd_ok])
+    return side_score >= 3
 
 
 def check_short(df: pd.DataFrame, idx: int) -> bool:
     """
-    SHORT (ters mantık – tepe):
-    - EMA5 en yüksek noktada + düşmeye başlamış
-    - KDJ 80-100
-    - StochRSI 70-100
-    - MACD: DIF yukarıdan aşağı DEA kesiyor
-    - Williams %R -30 ile 0 arası
-    - RSI 70-100
+    SHORT:
+    1) EMA5 en tepede + düşmeye başlamış (ana tetik)
+    2) KDJ 75-100, StochRSI 65-100, RSI 65-100, Williams -35/0
+       → ±2 mum içinde
+    3) MACD DIF↓DEA veya hist aşağı (±2 mum)
     """
     if idx < 3:
         return False
-    curr, prev = df.iloc[idx], df.iloc[idx - 1]
 
-    # EMA5 en yüksek noktada + düşmeye başlamış
-    start_e = max(0, idx - 12)
-    ema5_max = df["ema5"].iloc[start_e:idx + 1].max()
-    ema5_at_high = curr["ema5"] >= ema5_max * 0.998
-    ema5_falling = curr["ema5"] < prev["ema5"]
-    ema_ok = ema5_at_high and ema5_falling
+    if not _ema5_at_top(df, idx):
+        return False
 
-    kdj_ok = 80 <= curr["kdj_k"] <= 100 or 80 <= curr["kdj_j"] <= 100
-    stoch_ok = 70 <= curr["stochrsi_k"] <= 100
-    macd_ok = prev["macd_dif"] >= prev["macd_dea"] and curr["macd_dif"] < curr["macd_dea"]
-    will_ok = -30 <= curr["williams_r"] <= 0
-    rsi_ok = 70 <= curr["rsi14"] <= 100 or 70 <= curr["rsi6"] <= 100
+    kdj_ok = _any_in_window(df, idx, _kdj_short_ok, 2)
+    stoch_ok = _any_in_window(df, idx, _stoch_short_ok, 2)
+    rsi_ok = _any_in_window(df, idx, _rsi_short_ok, 2)
+    will_ok = _any_in_window(df, idx, _will_short_ok, 2)
+    macd_ok = _macd_short_ok(df, idx)
 
-    return all([ema_ok, kdj_ok, stoch_ok, macd_ok, will_ok, rsi_ok])
+    side_score = sum([kdj_ok, stoch_ok, rsi_ok, will_ok, macd_ok])
+    return side_score >= 3
 
 
 def detect_signal(df: pd.DataFrame) -> Optional[str]:
     if df is None or len(df) < 30:
         return None
-    start = max(len(df) - 1 - SIGNAL_LOOKBACK, 3)
+    # Son 6 muma bak (±2 + biraz pay)
+    start = max(len(df) - 1 - 6, 3)
     for idx in range(len(df) - 1, start - 1, -1):
         if check_long(df, idx):
             return "LONG"
@@ -341,15 +420,26 @@ def detect_signal(df: pd.DataFrame) -> Optional[str]:
 
 
 def find_signal_indices(df: pd.DataFrame, lookback: int = 96) -> Dict[str, List[int]]:
-    """Grafik için son lookback mum içindeki LONG/SHORT noktalarını bul"""
     longs, shorts = [], []
     start = max(3, len(df) - lookback)
     for idx in range(start, len(df)):
         if check_long(df, idx):
-            longs.append(idx - start)   # plot index
+            longs.append(idx - start)
         if check_short(df, idx):
             shorts.append(idx - start)
     return {"long": longs, "short": shorts}
+
+
+def find_ema_extremes(df: pd.DataFrame, lookback: int = 96) -> Dict[str, List[int]]:
+    """Grafikte EMA5 tepe/dip noktalarını işaretlemek için"""
+    bottoms, tops = [], []
+    start = max(3, len(df) - lookback)
+    for idx in range(start, len(df)):
+        if _ema5_at_bottom(df, idx):
+            bottoms.append(idx - start)
+        if _ema5_at_top(df, idx):
+            tops.append(idx - start)
+    return {"bottoms": bottoms, "tops": tops}
 
 
 # -------------------- Charts --------------------
@@ -365,13 +455,13 @@ def _style_axes(ax):
 
 def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
     try:
-        plot_df = df.tail(96).copy().reset_index(drop=True)  # ~1 gün (15m)
+        plot_df = df.tail(96).copy().reset_index(drop=True)
         signals = find_signal_indices(df, lookback=96)
+        extremes = find_ema_extremes(df, lookback=96)
 
         fig = plt.figure(figsize=(14, 16), facecolor="#0e1117")
         gs = fig.add_gridspec(6, 1, height_ratios=[3.2, 1, 1, 1, 1, 1], hspace=0.08)
 
-        # 1. Fiyat + EMA + Entry/TP/SL + dikey çizgiler
         ax1 = fig.add_subplot(gs[0])
         _style_axes(ax1)
         for i in range(len(plot_df)):
@@ -383,17 +473,24 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         ax1.plot(plot_df["ema20"], color="#e040fb", linewidth=1.4, label="EMA20")
         ax1.plot(plot_df["ema99"], color="#7c4dff", linewidth=1.3, label="EMA99")
 
-        # LONG dikey kesik çizgi (mavi)
-        for x in signals["long"]:
-            ax1.axvline(x, color="#2196f3", linestyle="--", linewidth=1.0, alpha=0.7)
-        # SHORT dikey kesik çizgi (kırmızı)
-        for x in signals["short"]:
-            ax1.axvline(x, color="#ff1744", linestyle="--", linewidth=1.0, alpha=0.7)
+        # EMA DİP = mavi kesik çizgi | EMA TEPE = kırmızı kesik çizgi
+        for x in extremes["bottoms"]:
+            if 0 <= x < len(plot_df):
+                ax1.axvline(x, color="#2196f3", linestyle="--", linewidth=1.4, alpha=0.9)
+                ax1.scatter(x, plot_df["ema5"].iloc[x], marker="^", s=70, color="#2196f3", zorder=5)
+        for x in extremes["tops"]:
+            if 0 <= x < len(plot_df):
+                ax1.axvline(x, color="#ff1744", linestyle="--", linewidth=1.4, alpha=0.9)
+                ax1.scatter(x, plot_df["ema5"].iloc[x], marker="v", s=70, color="#ff1744", zorder=5)
 
-        ax1.axhline(pos.entry_price, color="#2196f3", linestyle="--", linewidth=1.4, label=f"Giriş {pos.entry_price:.4f}")
+        ax1.axhline(pos.entry_price, color="#00bcd4", linestyle="-", linewidth=1.4, label=f"Giriş {pos.entry_price:.4f}")
         ax1.axhline(pos.tp, color="#00e676", linestyle="-", linewidth=1.5, label=f"TP {pos.tp:.4f}")
-        ax1.axhline(pos.sl, color="#ff1744", linestyle="-", linewidth=1.5, label=f"SL {pos.sl:.4f}")
-        ax1.set_title(f"{pos.symbol} | {pos.side} | 10x | 100$ | 15m | SL=1.5ATR", color="white", fontsize=13, pad=8)
+        ax1.axhline(pos.sl, color="#ff9100", linestyle="-", linewidth=1.5, label=f"SL {pos.sl:.4f}")
+        ax1.set_title(
+            f"{pos.symbol} | {pos.side} | 10x | 100$ | 15m | SL=1.5ATR\n"
+            f"Mavi kesik = EMA dip | Kırmızı kesik = EMA tepe",
+            color="white", fontsize=11, pad=8
+        )
         ax1.legend(loc="upper left", fontsize=8, facecolor="#1e222d", edgecolor="none", labelcolor="white")
 
         # 2. KDJ
@@ -447,6 +544,15 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         ax6.set_ylabel("Wm %R", color="#aaa", fontsize=9)
         ax6.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
 
+        # Tüm panellere EMA dip (mavi) / tepe (kırmızı) kesik çizgiler
+        for ax in [ax2, ax3, ax4, ax5, ax6]:
+            for x in extremes["bottoms"]:
+                if 0 <= x < len(plot_df):
+                    ax.axvline(x, color="#2196f3", linestyle="--", linewidth=1.2, alpha=0.85)
+            for x in extremes["tops"]:
+                if 0 <= x < len(plot_df):
+                    ax.axvline(x, color="#ff1744", linestyle="--", linewidth=1.2, alpha=0.85)
+
         for ax in [ax1, ax2, ax3, ax4, ax5]:
             plt.setp(ax.get_xticklabels(), visible=False)
 
@@ -466,6 +572,7 @@ def create_indicator_chart(df: pd.DataFrame, symbol: str) -> Optional[bytes]:
         last_close = float(plot_df["close"].iloc[-1])
         last_atr = float(plot_df["atr"].iloc[-1]) if pd.notna(plot_df["atr"].iloc[-1]) else 0.0
         signals = find_signal_indices(df, lookback=96)
+        extremes = find_ema_extremes(df, lookback=96)
 
         fig = plt.figure(figsize=(14, 16), facecolor="#0e1117")
         gs = fig.add_gridspec(6, 1, height_ratios=[3.2, 1, 1, 1, 1, 1], hspace=0.08)
@@ -481,14 +588,22 @@ def create_indicator_chart(df: pd.DataFrame, symbol: str) -> Optional[bytes]:
         ax1.plot(plot_df["ema20"], color="#e040fb", linewidth=1.4, label="EMA20")
         ax1.plot(plot_df["ema99"], color="#7c4dff", linewidth=1.3, label="EMA99")
 
-        for x in signals["long"]:
-            ax1.axvline(x, color="#2196f3", linestyle="--", linewidth=1.0, alpha=0.7)
-        for x in signals["short"]:
-            ax1.axvline(x, color="#ff1744", linestyle="--", linewidth=1.0, alpha=0.7)
+        # EMA DİP = mavi kesik çizgi | EMA TEPE = kırmızı kesik çizgi (tüm panellere)
+        all_axes_later = []  # diğer paneller eklendikten sonra çizilecek
+
+        for x in extremes["bottoms"]:
+            if 0 <= x < len(plot_df):
+                ax1.axvline(x, color="#2196f3", linestyle="--", linewidth=1.5, alpha=0.95)
+                ax1.scatter(x, plot_df["ema5"].iloc[x], marker="^", s=80, color="#2196f3", zorder=5)
+        for x in extremes["tops"]:
+            if 0 <= x < len(plot_df):
+                ax1.axvline(x, color="#ff1744", linestyle="--", linewidth=1.5, alpha=0.95)
+                ax1.scatter(x, plot_df["ema5"].iloc[x], marker="v", s=80, color="#ff1744", zorder=5)
 
         ax1.set_title(
-            f"{symbol} | Fiyat: {last_close:.4f} | ATR: {last_atr:.4f} | 15m | ~1gün",
-            color="white", fontsize=13, pad=8
+            f"{symbol} | Fiyat: {last_close:.4f} | ATR: {last_atr:.4f} | 15m | ~1gün\n"
+            f"Mavi kesik çizgi = EMA DİP | Kırmızı kesik çizgi = EMA TEPE",
+            color="white", fontsize=11, pad=8
         )
         ax1.legend(loc="upper left", fontsize=8, facecolor="#1e222d", edgecolor="none", labelcolor="white")
 
@@ -537,6 +652,15 @@ def create_indicator_chart(df: pd.DataFrame, symbol: str) -> Optional[bytes]:
         ax6.axhline(-80, color="#555", linestyle="--", linewidth=0.7)
         ax6.set_ylabel("Wm %R", color="#aaa", fontsize=9)
         ax6.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+
+        # Tüm panellere EMA dip (mavi) / tepe (kırmızı) kesik çizgiler
+        for ax in [ax2, ax3, ax4, ax5, ax6]:
+            for x in extremes["bottoms"]:
+                if 0 <= x < len(plot_df):
+                    ax.axvline(x, color="#2196f3", linestyle="--", linewidth=1.2, alpha=0.85)
+            for x in extremes["tops"]:
+                if 0 <= x < len(plot_df):
+                    ax.axvline(x, color="#ff1744", linestyle="--", linewidth=1.2, alpha=0.85)
 
         for ax in [ax1, ax2, ax3, ax4, ax5]:
             plt.setp(ax.get_xticklabels(), visible=False)
@@ -644,7 +768,7 @@ class TelegramNotifier:
         caption = (
             f"📈 <b>15m İndikatör Grafiği (~1 gün)</b>\n"
             f"Sembol: <code>{symbol}</code> | Fiyat: <code>{price:.4f}</code>\n"
-            f"Mavi kesik çizgi = LONG sinyali | Kırmızı kesik çizgi = SHORT sinyali"
+            f"Mavi kesik çizgi = EMA DİP | Kırmızı kesik çizgi = EMA TEPE"
         )
         try:
             await self.bot.send_photo(
