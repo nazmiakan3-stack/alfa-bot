@@ -42,19 +42,42 @@ TELEGRAM_CHAT_ID = "1734551753"
 
 LEVERAGE = 10
 NOTIONAL_USD = 100.0
-MARGIN_USD = 200.0
-VIRTUAL_BALANCE = 1000.0
-SCAN_INTERVAL_SECONDS = 60
+MARGIN_USD = 50.0              # 20 coin için marj düşürüldü
+VIRTUAL_BALANCE = 2000.0
+SCAN_INTERVAL_SECONDS = 90
 REPORT_INTERVAL_MINUTES = 60
-CHART_INTERVAL_SECONDS = 300
 TIMEFRAME = "15m"
 LOG_LEVEL = "INFO"
+
+# 20 coin: Altın + Gümüş + majör vadeli
+WATCH_SYMBOLS = [
+    "XAU/USDT:USDT",   # Altın
+    "XAG/USDT:USDT",   # Gümüş
+    "BTC/USDT:USDT",
+    "ETH/USDT:USDT",
+    "BNB/USDT:USDT",
+    "SOL/USDT:USDT",
+    "XRP/USDT:USDT",
+    "DOGE/USDT:USDT",
+    "ADA/USDT:USDT",
+    "AVAX/USDT:USDT",
+    "LINK/USDT:USDT",
+    "DOT/USDT:USDT",
+    "LTC/USDT:USDT",
+    "ATOM/USDT:USDT",
+    "UNI/USDT:USDT",
+    "APT/USDT:USDT",
+    "ARB/USDT:USDT",
+    "OP/USDT:USDT",
+    "SUI/USDT:USDT",
+    "NEAR/USDT:USDT",
+]
 
 EMA_FAST, EMA_MID, EMA_SLOW = 5, 20, 99
 RSI_FAST, RSI_SLOW = 6, 14
 ATR_PERIOD = 14
 WILLIAMS_PERIOD = 14
-SIGNAL_LOOKBACK = 4          # ±2 mum penceresi
+SIGNAL_LOOKBACK = 4
 # =====================================================
 
 logging.basicConfig(
@@ -122,10 +145,11 @@ class PaperTrader:
         logger.info(f"SANAL AÇILDI | {side} {symbol} | 10x | 100$ | Marj:200$ | Bakiye:{self.balance:.2f}")
         return pos
 
-    def update_positions(self, prices: Dict[str, float], df: Optional[pd.DataFrame] = None) -> List[Position]:
-        """TP/SL + EMA5/EMA20 ters kesişim ile kapatma"""
+    def update_positions(self, prices: Dict[str, float], dfs: Optional[Dict[str, pd.DataFrame]] = None) -> List[Position]:
+        """TP/SL + EMA5/EMA20 ters kesişim ile kapatma (her coin kendi df)"""
         closed_now = []
         still_open = []
+        dfs = dfs or {}
         for pos in self.positions:
             if pos.status != "OPEN":
                 continue
@@ -135,7 +159,6 @@ class PaperTrader:
                 continue
 
             hit = False
-            # 1) TP / SL
             if pos.side == "LONG":
                 if price >= pos.tp:
                     pos.status, pos.close_price, pos.pnl = "CLOSED_TP", pos.tp, (pos.tp - pos.entry_price) * pos.quantity
@@ -151,18 +174,15 @@ class PaperTrader:
                     pos.status, pos.close_price, pos.pnl = "CLOSED_SL", pos.sl, (pos.entry_price - pos.sl) * pos.quantity
                     hit = True
 
-            # 2) EMA5 / EMA20 ters kesişim ile çıkış
+            df = dfs.get(pos.symbol)
             if not hit and df is not None and len(df) >= 2:
-                curr = df.iloc[-1]
-                prev = df.iloc[-2]
+                curr, prev = df.iloc[-1], df.iloc[-2]
                 if pos.side == "LONG":
-                    # EMA5 üstten EMA20'yi aşağı kesti → LONG kapat
                     if prev["ema5"] >= prev["ema20"] and curr["ema5"] < curr["ema20"]:
                         pos.status, pos.close_price = "CLOSED_EMA_CROSS", price
                         pos.pnl = (price - pos.entry_price) * pos.quantity
                         hit = True
                 else:
-                    # EMA5 alttan EMA20'yi yukarı kesti → SHORT kapat
                     if prev["ema5"] <= prev["ema20"] and curr["ema5"] > curr["ema20"]:
                         pos.status, pos.close_price = "CLOSED_EMA_CROSS", price
                         pos.pnl = (pos.entry_price - price) * pos.quantity
@@ -263,32 +283,32 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
 # Diğer indikatörler ±2 mum içinde şartı sağlarsa pozisyon açılır
 
 def _ema5_at_bottom(df: pd.DataFrame, idx: int) -> bool:
-    """EMA5 lokal dip + yukarı dönüş (canlı mumda gelecek bar aranmaz)"""
+    """EMA5 lokal dip + net yukarı dönüş (düşerken LONG açılmaz)"""
     if idx < 3:
         return False
     e = df["ema5"]
     start = max(0, idx - 8)
-    at_low = e.iloc[idx] <= e.iloc[start:idx + 1].min() * 1.001
-    rising = e.iloc[idx] >= e.iloc[idx - 1]
-    # Pivot: önceki 2 mumdan düşük
+    at_low = e.iloc[idx] <= e.iloc[start:idx + 1].min() * 1.002
+    # Net yükseliş zorunlu (önceki mumdan yüksek)
+    rising = e.iloc[idx] > e.iloc[idx - 1]
     is_pivot = e.iloc[idx] <= e.iloc[idx - 1] and e.iloc[idx] <= e.iloc[idx - 2]
     if idx < len(df) - 1:
         is_pivot = is_pivot and e.iloc[idx] <= e.iloc[idx + 1]
-    return (is_pivot and rising) or (at_low and rising)
+    return rising and (is_pivot or at_low)
 
 
 def _ema5_at_top(df: pd.DataFrame, idx: int) -> bool:
-    """EMA5 lokal tepe + aşağı dönüş (canlı mumda gelecek bar aranmaz)"""
+    """EMA5 lokal tepe + net aşağı dönüş (yükselirken SHORT açılmaz)"""
     if idx < 3:
         return False
     e = df["ema5"]
     start = max(0, idx - 8)
-    at_high = e.iloc[idx] >= e.iloc[start:idx + 1].max() * 0.999
-    falling = e.iloc[idx] <= e.iloc[idx - 1]
+    at_high = e.iloc[idx] >= e.iloc[start:idx + 1].max() * 0.998
+    falling = e.iloc[idx] < e.iloc[idx - 1]
     is_pivot = e.iloc[idx] >= e.iloc[idx - 1] and e.iloc[idx] >= e.iloc[idx - 2]
     if idx < len(df) - 1:
         is_pivot = is_pivot and e.iloc[idx] >= e.iloc[idx + 1]
-    return (is_pivot and falling) or (at_high and falling)
+    return falling and (is_pivot or at_high)
 
 
 def _kdj_long_ok(row) -> bool:
@@ -756,17 +776,21 @@ class TelegramNotifier:
         except Exception as e:
             logger.error(f"Telegram hata: {e}")
 
-    async def send_startup(self):
+    async def send_startup(self, n_symbols: int = 20, symbols: Optional[List[str]] = None):
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        sym_txt = ", ".join((symbols or [])[:8])
+        if symbols and len(symbols) > 8:
+            sym_txt += f" … +{len(symbols)-8}"
         await self.send(
-            f"✅ <b>Peak Reversal Futures Bot aktif</b>\n"
-            f"📁 Dosya: <code>gem1_final.py</code>\n"
-            f"Sadece <b>XAGUSDT</b> | Sanal Bakiye: 1000 USDT\n"
-            f"10x İzole | 100$ İşlem | 200$ Marj\n"
-            f"Timeframe: <b>15m</b>\n"
-            f"LONG: EMA5 dip+doluyor | KDJ0-20 | Stoch0-30 | RSI0-30 | MACD↑ | Wm-100/-70\n"
-            f"SHORT: EMA5 tepe+düşüyor | KDJ80-100 | Stoch70-100 | RSI70-100 | MACD↓ | Wm-30/0\n"
-            f"SL = 1.5×ATR | TP = 2×ATR | Ters EMA kesişimde kapanır\n"
+            f"✅ <b>Bot başlatıldı</b>\n"
+            f"📁 <code>gem1_final.py</code>\n"
+            f"Coin: <b>{n_symbols}</b> (Altın + Gümüş dahil)\n"
+            f"<code>{sym_txt}</code>\n"
+            f"Sanal cüzdan: <b>{VIRTUAL_BALANCE:.0f} USDT</b>\n"
+            f"İşlem: 100$ | Marj: {MARGIN_USD:.0f}$ | 10x | TF: 15m\n"
+            f"Pozisyon açılınca: grafik + Giriş/TP/SL\n"
+            f"Saatlik rapor: kar/zarar + cüzdan\n"
+            f"15 dk grafik <b>kapalı</b>\n"
             f"<code>{now}</code>"
         )
 
@@ -802,27 +826,31 @@ class TelegramNotifier:
             f"{emoji} <b>Pozisyon Kapandı</b>\n\n"
             f"Sembol: <code>{pos.symbol}</code> | {pos.side}\n"
             f"Giriş → Çıkış: <code>{pos.entry_price:.6f}</code> → <code>{pos.close_price:.6f}</code>\n"
-            f"PnL: <b>{pos.pnl:+.4f} USDT</b> | {pos.status}"
+            f"PnL: <b>{pos.pnl:+.4f} USDT</b>\n"
+            f"Sebep: <code>{pos.status}</code>\n"
+            f"Süre: {pos.open_time.strftime('%H:%M')} → {datetime.utcnow().strftime('%H:%M')} UTC"
         )
 
     async def send_hourly(self, scanned: int, new_trades: int, open_pos: List[Position],
-                          total_pnl: float, total_trades: int, balance: float = 1000.0):
+                          total_pnl: float, total_trades: int, balance: float = 2000.0):
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         lines = [
-            f"📊 <b>Saatlik Rapor</b> – {now}",
-            f"Sanal Bakiye: <b>{balance:.2f} USDT</b>",
-            f"Bu saatte açılan: <b>{new_trades}</b>",
-            f"Aktif Pozisyon: <b>{len(open_pos)}</b>",
-            f"Toplam İşlem: <b>{total_trades}</b>",
-            f"P&L (Sanal): <b>{total_pnl:+.4f} USDT</b>",
+            f"📊 <b>Saatlik Cüzdan Raporu</b> – {now}",
+            f"💰 Sanal cüzdan: <b>{balance:.2f} USDT</b>",
+            f"📈 Toplam P&L: <b>{total_pnl:+.4f} USDT</b>",
+            f"Bu saatte açılan: <b>{new_trades}</b> | Toplam işlem: <b>{total_trades}</b>",
+            f"Aktif pozisyon: <b>{len(open_pos)}</b> / {scanned} coin",
             ""
         ]
         if open_pos:
-            lines.append("<b>Açık İşlemler:</b>")
-            for i, p in enumerate(open_pos[:12], 1):
-                lines.append(f"{i}. <code>{p.symbol}</code> | {p.side} | {p.entry_price:.5f}")
+            lines.append("<b>Açık pozisyonlar:</b>")
+            for i, p in enumerate(open_pos[:20], 1):
+                lines.append(
+                    f"{i}. <code>{p.symbol}</code> {p.side}\n"
+                    f"   Giriş {p.entry_price:.5f} | TP {p.tp:.5f} | SL {p.sl:.5f}"
+                )
         else:
-            lines.append("Açık işlem yok.")
+            lines.append("Açık pozisyon yok.")
         await self.send("\n".join(lines))
 
     async def send_indicator_chart(self, chart_bytes: bytes, symbol: str, price: float):
@@ -862,15 +890,24 @@ class PRFBBot:
 
     async def load_markets(self):
         await self.exchange.load_markets()
-        candidates = ["XAG/USDT:USDT", "XAGUSDT", "XAG/USDT"]
         self.symbols = []
-        for sym in candidates:
+        for sym in WATCH_SYMBOLS:
             if sym in self.exchange.markets:
-                self.symbols = [sym]
-                break
+                self.symbols.append(sym)
+            else:
+                # alternatif isimler dene
+                alt = sym.replace("/USDT:USDT", "USDT").replace("/", "")
+                found = False
+                for m in self.exchange.markets:
+                    if m.replace("/", "").replace(":USDT", "") == alt.replace(":USDT", ""):
+                        self.symbols.append(m)
+                        found = True
+                        break
+                if not found:
+                    logger.warning(f"Sembol bulunamadı: {sym}")
         if not self.symbols:
-            self.symbols = ["XAG/USDT:USDT"]
-        logger.info(f"Yüklenen sembol: {self.symbols}")
+            self.symbols = ["XAG/USDT:USDT", "XAU/USDT:USDT"]
+        logger.info(f"Yüklenen {len(self.symbols)} sembol: {self.symbols}")
 
     async def scan_symbol(self, symbol: str):
         async with self.sem:
@@ -898,7 +935,7 @@ class PRFBBot:
 
         signals = 0
         prices = {}
-        last_df = None
+        dfs: Dict[str, pd.DataFrame] = {}
         for res in results:
             if isinstance(res, Exception):
                 continue
@@ -906,7 +943,7 @@ class PRFBBot:
             if entry > 0:
                 prices[symbol] = entry
             if df is not None:
-                last_df = df
+                dfs[symbol] = df
                 self.last_df = df
             if signal and atr > 0 and df is not None:
                 pos = self.trader.open_position(symbol, signal, entry, atr)
@@ -916,12 +953,12 @@ class PRFBBot:
                     chart = create_signal_chart(df, pos)
                     await self.notifier.send_new_position(pos, chart)
 
-        closed = self.trader.update_positions(prices, last_df)
+        closed = self.trader.update_positions(prices, dfs)
         for pos in closed:
             await self.notifier.send_closed(pos)
 
         self.last_scan_count = len(self.symbols)
-        logger.info(f"Tarama bitti | Sinyal: {signals} | Açık: {len(self.trader.get_open_positions())}")
+        logger.info(f"Tarama bitti | Sembol:{len(self.symbols)} | Sinyal:{signals} | Açık:{len(self.trader.get_open_positions())}")
 
     async def scan_loop(self):
         while self.running:
@@ -948,35 +985,15 @@ class PRFBBot:
                 logger.error(f"Rapor hatası: {e}")
             await asyncio.sleep(REPORT_INTERVAL_MINUTES * 60)
 
-    async def chart_loop(self):
-        await asyncio.sleep(10)
-        while self.running:
-            try:
-                if not self.symbols:
-                    await asyncio.sleep(CHART_INTERVAL_SECONDS)
-                    continue
-                symbol = self.symbols[0]
-                _, _, entry, _, df = await self.scan_symbol(symbol)
-                if df is not None and entry > 0:
-                    open_pos = self.trader.get_open_positions()
-                    chart = create_indicator_chart(df, symbol, open_positions=open_pos)
-                    if chart:
-                        await self.notifier.send_indicator_chart(chart, symbol, entry)
-                        logger.info(f"15m grafik gönderildi | {symbol} @ {entry:.4f}")
-            except Exception as e:
-                logger.error(f"Grafik hatası: {e}")
-            await asyncio.sleep(CHART_INTERVAL_SECONDS)
-
     async def start(self):
         logger.info("=" * 50)
-        logger.info("Peak Reversal Futures Bot başlatılıyor... (gem1_final.py) | 15m | EMA5/20 cross")
+        logger.info("Peak Reversal Futures Bot | 20 coin | 15m | gem1_final.py")
         await self.load_markets()
-        await self.notifier.send_startup()
+        await self.notifier.send_startup(len(self.symbols), self.symbols)
         self.running = True
         await asyncio.gather(
             self.scan_loop(),
             self.report_loop(),
-            self.chart_loop()
         )
 
     async def stop(self):
