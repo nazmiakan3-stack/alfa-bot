@@ -142,14 +142,13 @@ class PaperTrader:
         self.positions.append(pos)
         self.trade_count += 1
         self.balance -= MARGIN_USD
-        logger.info(f"SANAL AÇILDI | {side} {symbol} | 10x | 100$ | Marj:200$ | Bakiye:{self.balance:.2f}")
+        logger.info(f"SANAL AÇILDI | {side} {symbol} | 10x | 100$ | Marj:{MARGIN_USD:.0f}$ | Bakiye:{self.balance:.2f}")
         return pos
 
     def update_positions(self, prices: Dict[str, float], dfs: Optional[Dict[str, pd.DataFrame]] = None) -> List[Position]:
-        """TP/SL + EMA5/EMA20 ters kesişim ile kapatma (her coin kendi df)"""
+        """Sadece TP / SL ile kapatma (EMA kesişim çıkışı kaldırıldı — gürültülü erken kapanma olmasın)"""
         closed_now = []
         still_open = []
-        dfs = dfs or {}
         for pos in self.positions:
             if pos.status != "OPEN":
                 continue
@@ -173,20 +172,6 @@ class PaperTrader:
                 elif price >= pos.sl:
                     pos.status, pos.close_price, pos.pnl = "CLOSED_SL", pos.sl, (pos.entry_price - pos.sl) * pos.quantity
                     hit = True
-
-            df = dfs.get(pos.symbol)
-            if not hit and df is not None and len(df) >= 2:
-                curr, prev = df.iloc[-1], df.iloc[-2]
-                if pos.side == "LONG":
-                    if prev["ema5"] >= prev["ema20"] and curr["ema5"] < curr["ema20"]:
-                        pos.status, pos.close_price = "CLOSED_EMA_CROSS", price
-                        pos.pnl = (price - pos.entry_price) * pos.quantity
-                        hit = True
-                else:
-                    if prev["ema5"] <= prev["ema20"] and curr["ema5"] > curr["ema20"]:
-                        pos.status, pos.close_price = "CLOSED_EMA_CROSS", price
-                        pos.pnl = (pos.entry_price - price) * pos.quantity
-                        hit = True
 
             if hit:
                 self.total_pnl += pos.pnl
@@ -802,7 +787,7 @@ class TelegramNotifier:
             f"Giriş: <code>{pos.entry_price:.6f}</code>\n"
             f"TP: <code>{pos.tp:.6f}</code>\nSL: <code>{pos.sl:.6f}</code> (1.5×ATR)\n"
             f"ATR: <code>{pos.atr:.6f}</code>\n"
-            f"İşlem: 100 USDT | Marj: 200 USDT | 10x | 15m"
+            f"İşlem: 100 USDT | Marj: {MARGIN_USD:.0f} USDT | 10x | 15m"
         )
         if not self.enabled:
             return
