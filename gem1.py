@@ -805,15 +805,18 @@ class TelegramNotifier:
             logger.error(f"Telegram grafik hatası: {e}")
             await self.send(caption)
 
-    async def send_closed(self, pos: Position):
+    async def send_closed(self, pos: Position, balance: float = 0.0, total_pnl: float = 0.0):
         emoji = "✅" if pos.pnl >= 0 else "❌"
         await self.send(
             f"{emoji} <b>Pozisyon Kapandı</b>\n\n"
             f"Sembol: <code>{pos.symbol}</code> | {pos.side}\n"
             f"Giriş → Çıkış: <code>{pos.entry_price:.6f}</code> → <code>{pos.close_price:.6f}</code>\n"
-            f"PnL: <b>{pos.pnl:+.4f} USDT</b>\n"
+            f"Bu işlem PnL: <b>{pos.pnl:+.4f} USDT</b>\n"
             f"Sebep: <code>{pos.status}</code>\n"
-            f"Süre: {pos.open_time.strftime('%H:%M')} → {datetime.utcnow().strftime('%H:%M')} UTC"
+            f"Süre: {pos.open_time.strftime('%H:%M')} → {datetime.utcnow().strftime('%H:%M')} UTC\n"
+            f"────────────\n"
+            f"💰 Cüzdan: <b>{balance:.2f} USDT</b>\n"
+            f"📈 Toplam P&L: <b>{total_pnl:+.4f} USDT</b>"
         )
 
     async def send_hourly(self, scanned: int, new_trades: int, open_pos: List[Position],
@@ -939,8 +942,13 @@ class PRFBBot:
                     await self.notifier.send_new_position(pos, chart)
 
         closed = self.trader.update_positions(prices, dfs)
+        stats = self.trader.get_stats()
         for pos in closed:
-            await self.notifier.send_closed(pos)
+            await self.notifier.send_closed(
+                pos,
+                balance=stats.get("balance", 0.0),
+                total_pnl=stats.get("total_pnl", 0.0),
+            )
 
         self.last_scan_count = len(self.symbols)
         logger.info(f"Tarama bitti | Sembol:{len(self.symbols)} | Sinyal:{signals} | Açık:{len(self.trader.get_open_positions())}")
