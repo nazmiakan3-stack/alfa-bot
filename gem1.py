@@ -442,122 +442,195 @@ def find_ema_extremes(df: pd.DataFrame, lookback: int = 96) -> Dict[str, List[in
     return {"bottoms": bottoms, "tops": tops}
 
 
-# -------------------- Charts --------------------
-def _style_axes(ax):
-    ax.set_facecolor("#0e1117")
-    ax.tick_params(colors="#aaa")
-    ax.grid(True, alpha=0.15, color="#555")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_color("#333")
-    ax.spines["bottom"].set_color("#333")
+# -------------------- Charts (Profesyonel stil) --------------------
+BG = "#131722"
+PANEL = "#1a1e2e"
+GRID = "#2a2e39"
+TEXT = "#d1d4dc"
+MUTED = "#787b86"
+UP = "#26a69a"
+DOWN = "#ef5350"
+EMA5_C = "#f0b90b"
+EMA20_C = "#e040fb"
+EMA99_C = "#2962ff"
+LONG_C = "#2196f3"
+SHORT_C = "#ff1744"
+TP_C = "#00e676"
+SL_C = "#ff6d00"
+ENTRY_C = "#00bcd4"
+
+
+def _style_axes(ax, ylabel: str = ""):
+    ax.set_facecolor(PANEL)
+    ax.tick_params(colors=MUTED, labelsize=8)
+    ax.yaxis.tick_right()
+    ax.yaxis.set_label_position("right")
+    ax.grid(True, alpha=0.25, color=GRID, linewidth=0.6, linestyle="-")
+    for sp in ax.spines.values():
+        sp.set_color("#2a2e39")
+        sp.set_linewidth(0.8)
+    if ylabel:
+        ax.set_ylabel(ylabel, color=MUTED, fontsize=9, fontweight="bold", labelpad=6)
+
+
+def _draw_candles(ax, plot_df):
+    for i in range(len(plot_df)):
+        o, h, l, c = plot_df["open"].iloc[i], plot_df["high"].iloc[i], plot_df["low"].iloc[i], plot_df["close"].iloc[i]
+        color = UP if c >= o else DOWN
+        ax.plot([i, i], [l, h], color=color, linewidth=1.0, solid_capstyle="round", zorder=2)
+        body_bottom, body_top = min(o, c), max(o, c)
+        height = max(body_top - body_bottom, (h - l) * 0.02 + 1e-8)
+        ax.add_patch(plt.Rectangle(
+            (i - 0.35, body_bottom), 0.7, height,
+            facecolor=color, edgecolor=color, linewidth=0, zorder=3, alpha=0.95
+        ))
+
+
+def _draw_ema_lines(ax, plot_df, extremes):
+    ax.plot(plot_df["ema5"], color=EMA5_C, linewidth=1.6, label="EMA5", zorder=4)
+    ax.plot(plot_df["ema20"], color=EMA20_C, linewidth=1.4, label="EMA20", zorder=4)
+    ax.plot(plot_df["ema99"], color=EMA99_C, linewidth=1.3, label="EMA99", zorder=4, alpha=0.9)
+
+    for x in extremes.get("bottoms", []):
+        if 0 <= x < len(plot_df):
+            ax.axvline(x, color=LONG_C, linestyle="--", linewidth=1.15, alpha=0.75, zorder=1)
+            ax.scatter(x, plot_df["ema5"].iloc[x], marker="^", s=55, color=LONG_C,
+                       edgecolors="white", linewidths=0.6, zorder=6)
+    for x in extremes.get("tops", []):
+        if 0 <= x < len(plot_df):
+            ax.axvline(x, color=SHORT_C, linestyle="--", linewidth=1.15, alpha=0.75, zorder=1)
+            ax.scatter(x, plot_df["ema5"].iloc[x], marker="v", s=55, color=SHORT_C,
+                       edgecolors="white", linewidths=0.6, zorder=6)
+
+
+def _draw_extreme_vlines(axes, extremes, n):
+    for ax in axes:
+        for x in extremes.get("bottoms", []):
+            if 0 <= x < n:
+                ax.axvline(x, color=LONG_C, linestyle="--", linewidth=1.0, alpha=0.55, zorder=1)
+        for x in extremes.get("tops", []):
+            if 0 <= x < n:
+                ax.axvline(x, color=SHORT_C, linestyle="--", linewidth=1.0, alpha=0.55, zorder=1)
+
+
+def _legend(ax):
+    leg = ax.legend(loc="upper left", fontsize=7.5, framealpha=0.92,
+                    facecolor="#1e2330", edgecolor="#363a45", labelcolor=TEXT)
+    leg.get_frame().set_linewidth(0.6)
+
+
+def _draw_levels(ax, entry: float, tp: float, sl: float, side: str = ""):
+    """Giriş / TP / SL yatay çizgi + sağda etiket"""
+    n_right = ax.get_xlim()[1] if ax.get_xlim()[1] > 1 else 95
+    # Çizgiler
+    ax.axhline(entry, color=ENTRY_C, linestyle="-", linewidth=1.5, alpha=0.95, zorder=5)
+    ax.axhline(tp, color=TP_C, linestyle="-", linewidth=1.6, alpha=0.95, zorder=5)
+    ax.axhline(sl, color=SL_C, linestyle="-", linewidth=1.6, alpha=0.95, zorder=5)
+    # Etiketler (sağ kenar)
+    x_lab = n_right - 1
+    bbox = dict(boxstyle="round,pad=0.25", facecolor="#1e2330", edgecolor="#363a45", alpha=0.92)
+    ax.annotate(f"GİRİŞ  {entry:.4f}", xy=(x_lab, entry), xytext=(8, 0),
+                textcoords="offset points", color=ENTRY_C, fontsize=8, fontweight="bold",
+                va="center", ha="left", bbox=bbox, zorder=7)
+    ax.annotate(f"TP  {tp:.4f}", xy=(x_lab, tp), xytext=(8, 0),
+                textcoords="offset points", color=TP_C, fontsize=8, fontweight="bold",
+                va="center", ha="left", bbox=bbox, zorder=7)
+    ax.annotate(f"SL  {sl:.4f}", xy=(x_lab, sl), xytext=(8, 0),
+                textcoords="offset points", color=SL_C, fontsize=8, fontweight="bold",
+                va="center", ha="left", bbox=bbox, zorder=7)
+    # Legend için de ekle
+    ax.plot([], [], color=ENTRY_C, linewidth=1.5, label=f"Giriş {entry:.4f}")
+    ax.plot([], [], color=TP_C, linewidth=1.5, label=f"TP {tp:.4f}")
+    ax.plot([], [], color=SL_C, linewidth=1.5, label=f"SL {sl:.4f}")
 
 
 def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
     try:
         plot_df = df.tail(96).copy().reset_index(drop=True)
-        signals = find_signal_indices(df, lookback=96)
         extremes = find_ema_extremes(df, lookback=96)
+        n = len(plot_df)
 
-        fig = plt.figure(figsize=(14, 16), facecolor="#0e1117")
-        gs = fig.add_gridspec(6, 1, height_ratios=[3.2, 1, 1, 1, 1, 1], hspace=0.08)
+        fig = plt.figure(figsize=(15, 17), facecolor=BG)
+        gs = fig.add_gridspec(6, 1, height_ratios=[3.4, 1.05, 1.05, 1.1, 1.05, 1.0], hspace=0.06)
 
+        # --- Fiyat ---
         ax1 = fig.add_subplot(gs[0])
         _style_axes(ax1)
-        for i in range(len(plot_df)):
-            color = "#26a69a" if plot_df["close"].iloc[i] >= plot_df["open"].iloc[i] else "#ef5350"
-            ax1.plot([i, i], [plot_df["low"].iloc[i], plot_df["high"].iloc[i]], color=color, linewidth=0.8)
-            ax1.plot([i, i], [plot_df["open"].iloc[i], plot_df["close"].iloc[i]], color=color, linewidth=2.0)
-
-        ax1.plot(plot_df["ema5"], color="#f0b90b", linewidth=1.4, label="EMA5")
-        ax1.plot(plot_df["ema20"], color="#e040fb", linewidth=1.4, label="EMA20")
-        ax1.plot(plot_df["ema99"], color="#7c4dff", linewidth=1.3, label="EMA99")
-
-        # EMA DİP = mavi kesik çizgi | EMA TEPE = kırmızı kesik çizgi
-        for x in extremes["bottoms"]:
-            if 0 <= x < len(plot_df):
-                ax1.axvline(x, color="#2196f3", linestyle="--", linewidth=1.4, alpha=0.9)
-                ax1.scatter(x, plot_df["ema5"].iloc[x], marker="^", s=70, color="#2196f3", zorder=5)
-        for x in extremes["tops"]:
-            if 0 <= x < len(plot_df):
-                ax1.axvline(x, color="#ff1744", linestyle="--", linewidth=1.4, alpha=0.9)
-                ax1.scatter(x, plot_df["ema5"].iloc[x], marker="v", s=70, color="#ff1744", zorder=5)
-
-        ax1.axhline(pos.entry_price, color="#00bcd4", linestyle="-", linewidth=1.4, label=f"Giriş {pos.entry_price:.4f}")
-        ax1.axhline(pos.tp, color="#00e676", linestyle="-", linewidth=1.5, label=f"TP {pos.tp:.4f}")
-        ax1.axhline(pos.sl, color="#ff9100", linestyle="-", linewidth=1.5, label=f"SL {pos.sl:.4f}")
+        _draw_candles(ax1, plot_df)
+        _draw_ema_lines(ax1, plot_df, extremes)
+        ax1.set_xlim(-1, n + 12)  # etiketler için sağda boşluk
+        _draw_levels(ax1, pos.entry_price, pos.tp, pos.sl, pos.side)
+        side_emoji = "LONG ▲" if pos.side == "LONG" else "SHORT ▼"
         ax1.set_title(
-            f"{pos.symbol} | {pos.side} | 10x | 100$ | 15m | SL=1.5ATR\n"
-            f"Mavi kesik = EMA dip | Kırmızı kesik = EMA tepe",
-            color="white", fontsize=11, pad=8
+            f"{pos.symbol}  ·  {side_emoji}  ·  10x  ·  100$  ·  15m\n"
+            f"Mavi kesik = EMA dip  |  Kırmızı kesik = EMA tepe  |  Giriş / TP / SL çizgileri",
+            color=TEXT, fontsize=12, fontweight="bold", pad=10, loc="left"
         )
-        ax1.legend(loc="upper left", fontsize=8, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        _legend(ax1)
 
-        # 2. KDJ
+        # --- KDJ ---
         ax2 = fig.add_subplot(gs[1], sharex=ax1)
-        _style_axes(ax2)
-        ax2.plot(plot_df["kdj_k"], color="#f0b90b", linewidth=1, label="K")
-        ax2.plot(plot_df["kdj_d"], color="#e040fb", linewidth=1, label="D")
-        ax2.plot(plot_df["kdj_j"], color="#26a69a", linewidth=1, label="J")
-        ax2.axhline(80, color="#555", linestyle="--", linewidth=0.7)
-        ax2.axhline(20, color="#555", linestyle="--", linewidth=0.7)
-        ax2.set_ylabel("KDJ", color="#aaa", fontsize=9)
-        ax2.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        _style_axes(ax2, "KDJ")
+        ax2.plot(plot_df["kdj_k"], color=EMA5_C, linewidth=1.15, label="K")
+        ax2.plot(plot_df["kdj_d"], color=EMA20_C, linewidth=1.15, label="D")
+        ax2.plot(plot_df["kdj_j"], color=UP, linewidth=1.0, label="J", alpha=0.85)
+        ax2.axhline(80, color=MUTED, linestyle=":", linewidth=0.8)
+        ax2.axhline(20, color=MUTED, linestyle=":", linewidth=0.8)
+        ax2.fill_between(range(n), 80, 100, color=SHORT_C, alpha=0.06)
+        ax2.fill_between(range(n), 0, 20, color=LONG_C, alpha=0.06)
+        _legend(ax2)
 
-        # 3. StochRSI
+        # --- StochRSI ---
         ax3 = fig.add_subplot(gs[2], sharex=ax1)
-        _style_axes(ax3)
-        ax3.plot(plot_df["stochrsi_k"], color="#f0b90b", linewidth=1, label="StochRSI")
-        ax3.plot(plot_df["stochrsi_d"], color="#e040fb", linewidth=1, label="MA")
-        ax3.axhline(80, color="#555", linestyle="--", linewidth=0.7)
-        ax3.axhline(20, color="#555", linestyle="--", linewidth=0.7)
-        ax3.set_ylabel("StochRSI", color="#aaa", fontsize=9)
-        ax3.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        _style_axes(ax3, "StochRSI")
+        ax3.plot(plot_df["stochrsi_k"], color=EMA5_C, linewidth=1.15, label="K")
+        ax3.plot(plot_df["stochrsi_d"], color=EMA20_C, linewidth=1.15, label="D")
+        ax3.axhline(80, color=MUTED, linestyle=":", linewidth=0.8)
+        ax3.axhline(20, color=MUTED, linestyle=":", linewidth=0.8)
+        ax3.fill_between(range(n), 80, 100, color=SHORT_C, alpha=0.06)
+        ax3.fill_between(range(n), 0, 20, color=LONG_C, alpha=0.06)
+        _legend(ax3)
 
-        # 4. MACD
+        # --- MACD ---
         ax4 = fig.add_subplot(gs[3], sharex=ax1)
-        _style_axes(ax4)
-        ax4.plot(plot_df["macd_dif"], color="#26a69a", linewidth=1, label="DIF")
-        ax4.plot(plot_df["macd_dea"], color="#ef5350", linewidth=1, label="DEA")
-        colors = ["#26a69a" if v >= 0 else "#ef5350" for v in plot_df["macd_hist"]]
-        ax4.bar(range(len(plot_df)), plot_df["macd_hist"], color=colors, width=0.7, alpha=0.7)
-        ax4.axhline(0, color="#555", linewidth=0.7)
-        ax4.set_ylabel("MACD", color="#aaa", fontsize=9)
-        ax4.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        _style_axes(ax4, "MACD")
+        ax4.plot(plot_df["macd_dif"], color=UP, linewidth=1.15, label="DIF")
+        ax4.plot(plot_df["macd_dea"], color=DOWN, linewidth=1.15, label="DEA")
+        hist_colors = [UP if v >= 0 else DOWN for v in plot_df["macd_hist"]]
+        ax4.bar(range(n), plot_df["macd_hist"], color=hist_colors, width=0.65, alpha=0.65, zorder=2)
+        ax4.axhline(0, color=MUTED, linewidth=0.7)
+        _legend(ax4)
 
-        # 5. RSI
+        # --- RSI ---
         ax5 = fig.add_subplot(gs[4], sharex=ax1)
-        _style_axes(ax5)
-        ax5.plot(plot_df["rsi6"], color="#f0b90b", linewidth=1, label="RSI6")
-        ax5.plot(plot_df["rsi14"], color="#e040fb", linewidth=1, label="RSI14")
-        ax5.axhline(70, color="#555", linestyle="--", linewidth=0.7)
-        ax5.axhline(30, color="#555", linestyle="--", linewidth=0.7)
-        ax5.set_ylabel("RSI", color="#aaa", fontsize=9)
-        ax5.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        _style_axes(ax5, "RSI")
+        ax5.plot(plot_df["rsi6"], color=EMA5_C, linewidth=1.15, label="RSI6")
+        ax5.plot(plot_df["rsi14"], color=EMA20_C, linewidth=1.15, label="RSI14")
+        ax5.axhline(70, color=MUTED, linestyle=":", linewidth=0.8)
+        ax5.axhline(30, color=MUTED, linestyle=":", linewidth=0.8)
+        ax5.fill_between(range(n), 70, 100, color=SHORT_C, alpha=0.06)
+        ax5.fill_between(range(n), 0, 30, color=LONG_C, alpha=0.06)
+        _legend(ax5)
 
-        # 6. Williams
+        # --- Williams ---
         ax6 = fig.add_subplot(gs[5], sharex=ax1)
-        _style_axes(ax6)
-        ax6.plot(plot_df["williams_r"], color="#f0b90b", linewidth=1, label="Williams %R")
-        ax6.axhline(-20, color="#555", linestyle="--", linewidth=0.7)
-        ax6.axhline(-80, color="#555", linestyle="--", linewidth=0.7)
-        ax6.set_ylabel("Wm %R", color="#aaa", fontsize=9)
-        ax6.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        _style_axes(ax6, "Wm %R")
+        ax6.plot(plot_df["williams_r"], color=EMA5_C, linewidth=1.2, label="Williams %R")
+        ax6.axhline(-20, color=MUTED, linestyle=":", linewidth=0.8)
+        ax6.axhline(-80, color=MUTED, linestyle=":", linewidth=0.8)
+        ax6.fill_between(range(n), -20, 0, color=SHORT_C, alpha=0.06)
+        ax6.fill_between(range(n), -100, -80, color=LONG_C, alpha=0.06)
+        _legend(ax6)
 
-        # Tüm panellere EMA dip (mavi) / tepe (kırmızı) kesik çizgiler
-        for ax in [ax2, ax3, ax4, ax5, ax6]:
-            for x in extremes["bottoms"]:
-                if 0 <= x < len(plot_df):
-                    ax.axvline(x, color="#2196f3", linestyle="--", linewidth=1.2, alpha=0.85)
-            for x in extremes["tops"]:
-                if 0 <= x < len(plot_df):
-                    ax.axvline(x, color="#ff1744", linestyle="--", linewidth=1.2, alpha=0.85)
+        _draw_extreme_vlines([ax2, ax3, ax4, ax5, ax6], extremes, n)
 
         for ax in [ax1, ax2, ax3, ax4, ax5]:
             plt.setp(ax.get_xticklabels(), visible=False)
+        ax6.tick_params(axis="x", labelsize=7)
 
+        fig.tight_layout(pad=0.6)
         buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=120, bbox_inches="tight", facecolor=fig.get_facecolor())
+        plt.savefig(buf, format="png", dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor(), edgecolor="none")
         plt.close(fig)
         buf.seek(0)
         return buf.read()
@@ -566,107 +639,97 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         return None
 
 
-def create_indicator_chart(df: pd.DataFrame, symbol: str) -> Optional[bytes]:
+def create_indicator_chart(df: pd.DataFrame, symbol: str, open_positions: Optional[List] = None) -> Optional[bytes]:
     try:
         plot_df = df.tail(96).copy().reset_index(drop=True)
         last_close = float(plot_df["close"].iloc[-1])
         last_atr = float(plot_df["atr"].iloc[-1]) if pd.notna(plot_df["atr"].iloc[-1]) else 0.0
-        signals = find_signal_indices(df, lookback=96)
         extremes = find_ema_extremes(df, lookback=96)
+        n = len(plot_df)
 
-        fig = plt.figure(figsize=(14, 16), facecolor="#0e1117")
-        gs = fig.add_gridspec(6, 1, height_ratios=[3.2, 1, 1, 1, 1, 1], hspace=0.08)
+        fig = plt.figure(figsize=(15, 17), facecolor=BG)
+        gs = fig.add_gridspec(6, 1, height_ratios=[3.4, 1.05, 1.05, 1.1, 1.05, 1.0], hspace=0.06)
 
         ax1 = fig.add_subplot(gs[0])
         _style_axes(ax1)
-        for i in range(len(plot_df)):
-            color = "#26a69a" if plot_df["close"].iloc[i] >= plot_df["open"].iloc[i] else "#ef5350"
-            ax1.plot([i, i], [plot_df["low"].iloc[i], plot_df["high"].iloc[i]], color=color, linewidth=0.8)
-            ax1.plot([i, i], [plot_df["open"].iloc[i], plot_df["close"].iloc[i]], color=color, linewidth=2.0)
+        _draw_candles(ax1, plot_df)
+        _draw_ema_lines(ax1, plot_df, extremes)
 
-        ax1.plot(plot_df["ema5"], color="#f0b90b", linewidth=1.4, label="EMA5")
-        ax1.plot(plot_df["ema20"], color="#e040fb", linewidth=1.4, label="EMA20")
-        ax1.plot(plot_df["ema99"], color="#7c4dff", linewidth=1.3, label="EMA99")
-
-        # EMA DİP = mavi kesik çizgi | EMA TEPE = kırmızı kesik çizgi (tüm panellere)
-        all_axes_later = []  # diğer paneller eklendikten sonra çizilecek
-
-        for x in extremes["bottoms"]:
-            if 0 <= x < len(plot_df):
-                ax1.axvline(x, color="#2196f3", linestyle="--", linewidth=1.5, alpha=0.95)
-                ax1.scatter(x, plot_df["ema5"].iloc[x], marker="^", s=80, color="#2196f3", zorder=5)
-        for x in extremes["tops"]:
-            if 0 <= x < len(plot_df):
-                ax1.axvline(x, color="#ff1744", linestyle="--", linewidth=1.5, alpha=0.95)
-                ax1.scatter(x, plot_df["ema5"].iloc[x], marker="v", s=80, color="#ff1744", zorder=5)
+        # Açık pozisyon varsa Giriş / TP / SL göster
+        title_extra = "Mavi kesik = EMA dip  |  Kırmızı kesik = EMA tepe"
+        if open_positions:
+            ax1.set_xlim(-1, n + 12)
+            for p in open_positions:
+                if getattr(p, "symbol", "") == symbol or True:
+                    _draw_levels(ax1, p.entry_price, p.tp, p.sl, p.side)
+                    title_extra = f"Giriş {p.entry_price:.4f}  |  TP {p.tp:.4f}  |  SL {p.sl:.4f}"
+                    break
 
         ax1.set_title(
-            f"{symbol} | Fiyat: {last_close:.4f} | ATR: {last_atr:.4f} | 15m | ~1gün\n"
-            f"Mavi kesik çizgi = EMA DİP | Kırmızı kesik çizgi = EMA TEPE",
-            color="white", fontsize=11, pad=8
+            f"{symbol}  ·  {last_close:.4f}  ·  ATR {last_atr:.4f}  ·  15m  ·  ~1 gün\n"
+            f"{title_extra}",
+            color=TEXT, fontsize=12, fontweight="bold", pad=10, loc="left"
         )
-        ax1.legend(loc="upper left", fontsize=8, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        _legend(ax1)
 
         ax2 = fig.add_subplot(gs[1], sharex=ax1)
-        _style_axes(ax2)
-        ax2.plot(plot_df["kdj_k"], color="#f0b90b", linewidth=1, label="K")
-        ax2.plot(plot_df["kdj_d"], color="#e040fb", linewidth=1, label="D")
-        ax2.plot(plot_df["kdj_j"], color="#26a69a", linewidth=1, label="J")
-        ax2.axhline(80, color="#555", linestyle="--", linewidth=0.7)
-        ax2.axhline(20, color="#555", linestyle="--", linewidth=0.7)
-        ax2.set_ylabel("KDJ", color="#aaa", fontsize=9)
-        ax2.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        _style_axes(ax2, "KDJ")
+        ax2.plot(plot_df["kdj_k"], color=EMA5_C, linewidth=1.15, label="K")
+        ax2.plot(plot_df["kdj_d"], color=EMA20_C, linewidth=1.15, label="D")
+        ax2.plot(plot_df["kdj_j"], color=UP, linewidth=1.0, label="J", alpha=0.85)
+        ax2.axhline(80, color=MUTED, linestyle=":", linewidth=0.8)
+        ax2.axhline(20, color=MUTED, linestyle=":", linewidth=0.8)
+        ax2.fill_between(range(n), 80, 100, color=SHORT_C, alpha=0.06)
+        ax2.fill_between(range(n), 0, 20, color=LONG_C, alpha=0.06)
+        _legend(ax2)
 
         ax3 = fig.add_subplot(gs[2], sharex=ax1)
-        _style_axes(ax3)
-        ax3.plot(plot_df["stochrsi_k"], color="#f0b90b", linewidth=1, label="StochRSI")
-        ax3.plot(plot_df["stochrsi_d"], color="#e040fb", linewidth=1, label="MA")
-        ax3.axhline(80, color="#555", linestyle="--", linewidth=0.7)
-        ax3.axhline(20, color="#555", linestyle="--", linewidth=0.7)
-        ax3.set_ylabel("StochRSI", color="#aaa", fontsize=9)
-        ax3.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        _style_axes(ax3, "StochRSI")
+        ax3.plot(plot_df["stochrsi_k"], color=EMA5_C, linewidth=1.15, label="K")
+        ax3.plot(plot_df["stochrsi_d"], color=EMA20_C, linewidth=1.15, label="D")
+        ax3.axhline(80, color=MUTED, linestyle=":", linewidth=0.8)
+        ax3.axhline(20, color=MUTED, linestyle=":", linewidth=0.8)
+        ax3.fill_between(range(n), 80, 100, color=SHORT_C, alpha=0.06)
+        ax3.fill_between(range(n), 0, 20, color=LONG_C, alpha=0.06)
+        _legend(ax3)
 
         ax4 = fig.add_subplot(gs[3], sharex=ax1)
-        _style_axes(ax4)
-        ax4.plot(plot_df["macd_dif"], color="#26a69a", linewidth=1, label="DIF")
-        ax4.plot(plot_df["macd_dea"], color="#ef5350", linewidth=1, label="DEA")
-        colors = ["#26a69a" if v >= 0 else "#ef5350" for v in plot_df["macd_hist"]]
-        ax4.bar(range(len(plot_df)), plot_df["macd_hist"], color=colors, width=0.7, alpha=0.7)
-        ax4.axhline(0, color="#555", linewidth=0.7)
-        ax4.set_ylabel("MACD", color="#aaa", fontsize=9)
-        ax4.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        _style_axes(ax4, "MACD")
+        ax4.plot(plot_df["macd_dif"], color=UP, linewidth=1.15, label="DIF")
+        ax4.plot(plot_df["macd_dea"], color=DOWN, linewidth=1.15, label="DEA")
+        hist_colors = [UP if v >= 0 else DOWN for v in plot_df["macd_hist"]]
+        ax4.bar(range(n), plot_df["macd_hist"], color=hist_colors, width=0.65, alpha=0.65, zorder=2)
+        ax4.axhline(0, color=MUTED, linewidth=0.7)
+        _legend(ax4)
 
         ax5 = fig.add_subplot(gs[4], sharex=ax1)
-        _style_axes(ax5)
-        ax5.plot(plot_df["rsi6"], color="#f0b90b", linewidth=1, label="RSI6")
-        ax5.plot(plot_df["rsi14"], color="#e040fb", linewidth=1, label="RSI14")
-        ax5.axhline(70, color="#555", linestyle="--", linewidth=0.7)
-        ax5.axhline(30, color="#555", linestyle="--", linewidth=0.7)
-        ax5.set_ylabel("RSI", color="#aaa", fontsize=9)
-        ax5.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        _style_axes(ax5, "RSI")
+        ax5.plot(plot_df["rsi6"], color=EMA5_C, linewidth=1.15, label="RSI6")
+        ax5.plot(plot_df["rsi14"], color=EMA20_C, linewidth=1.15, label="RSI14")
+        ax5.axhline(70, color=MUTED, linestyle=":", linewidth=0.8)
+        ax5.axhline(30, color=MUTED, linestyle=":", linewidth=0.8)
+        ax5.fill_between(range(n), 70, 100, color=SHORT_C, alpha=0.06)
+        ax5.fill_between(range(n), 0, 30, color=LONG_C, alpha=0.06)
+        _legend(ax5)
 
         ax6 = fig.add_subplot(gs[5], sharex=ax1)
-        _style_axes(ax6)
-        ax6.plot(plot_df["williams_r"], color="#f0b90b", linewidth=1, label="Williams %R")
-        ax6.axhline(-20, color="#555", linestyle="--", linewidth=0.7)
-        ax6.axhline(-80, color="#555", linestyle="--", linewidth=0.7)
-        ax6.set_ylabel("Wm %R", color="#aaa", fontsize=9)
-        ax6.legend(loc="upper left", fontsize=7, facecolor="#1e222d", edgecolor="none", labelcolor="white")
+        _style_axes(ax6, "Wm %R")
+        ax6.plot(plot_df["williams_r"], color=EMA5_C, linewidth=1.2, label="Williams %R")
+        ax6.axhline(-20, color=MUTED, linestyle=":", linewidth=0.8)
+        ax6.axhline(-80, color=MUTED, linestyle=":", linewidth=0.8)
+        ax6.fill_between(range(n), -20, 0, color=SHORT_C, alpha=0.06)
+        ax6.fill_between(range(n), -100, -80, color=LONG_C, alpha=0.06)
+        _legend(ax6)
 
-        # Tüm panellere EMA dip (mavi) / tepe (kırmızı) kesik çizgiler
-        for ax in [ax2, ax3, ax4, ax5, ax6]:
-            for x in extremes["bottoms"]:
-                if 0 <= x < len(plot_df):
-                    ax.axvline(x, color="#2196f3", linestyle="--", linewidth=1.2, alpha=0.85)
-            for x in extremes["tops"]:
-                if 0 <= x < len(plot_df):
-                    ax.axvline(x, color="#ff1744", linestyle="--", linewidth=1.2, alpha=0.85)
+        _draw_extreme_vlines([ax2, ax3, ax4, ax5, ax6], extremes, n)
 
         for ax in [ax1, ax2, ax3, ax4, ax5]:
             plt.setp(ax.get_xticklabels(), visible=False)
+        ax6.tick_params(axis="x", labelsize=7)
 
+        fig.tight_layout(pad=0.6)
         buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=120, bbox_inches="tight", facecolor=fig.get_facecolor())
+        plt.savefig(buf, format="png", dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor(), edgecolor="none")
         plt.close(fig)
         buf.seek(0)
         return buf.read()
@@ -895,7 +958,8 @@ class PRFBBot:
                 symbol = self.symbols[0]
                 _, _, entry, _, df = await self.scan_symbol(symbol)
                 if df is not None and entry > 0:
-                    chart = create_indicator_chart(df, symbol)
+                    open_pos = self.trader.get_open_positions()
+                    chart = create_indicator_chart(df, symbol, open_positions=open_pos)
                     if chart:
                         await self.notifier.send_indicator_chart(chart, symbol, entry)
                         logger.info(f"15m grafik gönderildi | {symbol} @ {entry:.4f}")
