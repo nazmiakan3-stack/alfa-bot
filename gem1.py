@@ -366,14 +366,8 @@ def check_short(df: pd.DataFrame, idx: int) -> bool:
 
 
 def detect_signal(df: pd.DataFrame) -> Optional[str]:
-    """
-    Grafik çizimleriyle tam senkronize edilmiş göz mekanizması:
-    Son kapanan ve aktif mumlar dahil edilerek dipler/tepeler anlık taranır.
-    """
     if df is None or len(df) < 30:
         return None
-    
-    # Grafikteki tarama hassasiyetiyle tam örtüşmesi için son 8 barı titizlikle kontrol ediyoruz
     start = max(len(df) - 1 - 8, 3)
     for idx in range(len(df) - 1, start - 1, -1):
         if check_long(df, idx):
@@ -386,12 +380,17 @@ def detect_signal(df: pd.DataFrame) -> Optional[str]:
 
 
 def find_ema_extremes(df: pd.DataFrame, lookback: int = 96) -> Dict[str, List[int]]:
+    """
+    Artık sadece EMA5 dip/tepe noktalarını değil, doğrudan botun işlem açtığı 
+    (check_long / check_short koşullarını sağlayan) gerçek sinyal noktalarını işaretler.
+    Böylece grafik ile bot kararları %100 senkronize olur.
+    """
     bottoms, tops = [], []
     start = max(3, len(df) - lookback)
     for idx in range(start, len(df)):
-        if _ema5_at_bottom(df, idx):
+        if check_long(df, idx):
             bottoms.append(idx - start)
-        if _ema5_at_top(df, idx):
+        if check_short(df, idx):
             tops.append(idx - start)
     return {"bottoms": bottoms, "tops": tops}
 
@@ -509,7 +508,7 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         side_emoji = "LONG ▲" if pos.side == "LONG" else "SHORT ▼"
         ax1.set_title(
             f"{pos.symbol}  ·  {side_emoji}  ·  10x  ·  100$  ·  15m\n"
-            f"Mavi kesik = EMA dip  |  Kırmızı kesik = EMA tepe",
+            f"Mavi kesik = Onaylı Long Sinyali  |  Kırmızı kesik = Onaylı Short Sinyali",
             color=TEXT, fontsize=12, fontweight="bold", pad=10, loc="left"
         )
         _legend(ax1)
