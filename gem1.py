@@ -1,21 +1,8 @@
 #!/usr/bin/env python3
 """
 Peak Reversal Futures Bot - TEK DOSYA VERSİYONU (gem1.py)
-Sadece XAGUSDT taranır.
+Sadece XAGUSDT ve diğer tanımlı pariteler taranır.
 Contabo / Termius için optimize edilmiştir.
-
-Güncel Mantık (2026-09-26):
-LONG:
-  - EMA5 en düşük noktada + dolmaya başlamış (EMA20 kesişimi YOK)
-  - KDJ 0-20 | StochRSI 0-30 | RSI 0-30
-  - MACD: DIF aşağıdan yukarı DEA kesiyor
-  - Williams %R: -100 ile -70 arası
-SHORT:
-  - EMA5 en yüksek noktada + düşmeye başlamış
-  - KDJ 80-100 | StochRSI 70-100 | RSI 70-100
-  - MACD: DIF yukarıdan aşağı DEA kesiyor
-  - Williams %R: -30 ile 0 arası
-Çıkış: TP/SL veya EMA5/EMA20 ters kesişim | SL=1.5ATR | TP=2ATR
 """
 
 import asyncio
@@ -42,17 +29,16 @@ TELEGRAM_CHAT_ID = "1734551753"
 
 LEVERAGE = 10
 NOTIONAL_USD = 100.0
-MARGIN_USD = 50.0              # 20 coin için marj düşürüldü
+MARGIN_USD = 50.0
 VIRTUAL_BALANCE = 2000.0
 SCAN_INTERVAL_SECONDS = 90
 REPORT_INTERVAL_MINUTES = 60
 TIMEFRAME = "15m"
 LOG_LEVEL = "INFO"
 
-# 20 coin: Altın + Gümüş + majör vadeli
 WATCH_SYMBOLS = [
-    "XAU/USDT:USDT",   # Altın
-    "XAG/USDT:USDT",   # Gümüş
+    "XAU/USDT:USDT",
+    "XAG/USDT:USDT",
     "BTC/USDT:USDT",
     "ETH/USDT:USDT",
     "BNB/USDT:USDT",
@@ -77,7 +63,6 @@ EMA_FAST, EMA_MID, EMA_SLOW = 5, 20, 99
 RSI_FAST, RSI_SLOW = 6, 14
 ATR_PERIOD = 14
 WILLIAMS_PERIOD = 14
-SIGNAL_LOOKBACK = 4
 DOSYA_ADI = "gem1.py"
 # =====================================================
 
@@ -90,7 +75,6 @@ logging.basicConfig(
 logger = logging.getLogger("PRFB")
 
 
-# -------------------- Paper Position --------------------
 @dataclass
 class Position:
     symbol: str
@@ -196,7 +180,6 @@ class PaperTrader:
         }
 
 
-# -------------------- Indicators --------------------
 def ohlcv_to_df(ohlcv: list) -> pd.DataFrame:
     df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
@@ -261,7 +244,6 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         return None
 
 
-# -------------------- Signal Logic --------------------
 def _ema5_at_bottom(df: pd.DataFrame, idx: int) -> bool:
     if idx < 3:
         return False
@@ -384,13 +366,21 @@ def check_short(df: pd.DataFrame, idx: int) -> bool:
 
 
 def detect_signal(df: pd.DataFrame) -> Optional[str]:
+    """
+    Grafik çizimleriyle tam senkronize edilmiş göz mekanizması:
+    Son kapanan ve aktif mumlar dahil edilerek dipler/tepeler anlık taranır.
+    """
     if df is None or len(df) < 30:
         return None
-    start = max(len(df) - 1 - 6, 3)
+    
+    # Grafikteki tarama hassasiyetiyle tam örtüşmesi için son 8 barı titizlikle kontrol ediyoruz
+    start = max(len(df) - 1 - 8, 3)
     for idx in range(len(df) - 1, start - 1, -1):
         if check_long(df, idx):
+            logger.info(f"LONG Sinyali Yakalandı! Bar Index: {idx}")
             return "LONG"
         if check_short(df, idx):
+            logger.info(f"SHORT Sinyali Yakalandı! Bar Index: {idx}")
             return "SHORT"
     return None
 
@@ -406,7 +396,7 @@ def find_ema_extremes(df: pd.DataFrame, lookback: int = 96) -> Dict[str, List[in
     return {"bottoms": bottoms, "tops": tops}
 
 
-# -------------------- Charts --------------------
+# -------------------- Charts & Telegram --------------------
 BG = "#131722"
 PANEL = "#1a1e2e"
 GRID = "#2a2e39"
@@ -499,9 +489,6 @@ def _draw_levels(ax, entry: float, tp: float, sl: float, side: str = ""):
     ax.annotate(f"SL  {sl:.4f}", xy=(x_lab, sl), xytext=(8, 0),
                 textcoords="offset points", color=SL_C, fontsize=8, fontweight="bold",
                 va="center", ha="left", bbox=bbox, zorder=7)
-    ax.plot([], [], color=ENTRY_C, linewidth=1.5, label=f"Giriş {entry:.4f}")
-    ax.plot([], [], color=TP_C, linewidth=1.5, label=f"TP {tp:.4f}")
-    ax.plot([], [], color=SL_C, linewidth=1.5, label=f"SL {sl:.4f}")
 
 
 def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
@@ -522,7 +509,7 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         side_emoji = "LONG ▲" if pos.side == "LONG" else "SHORT ▼"
         ax1.set_title(
             f"{pos.symbol}  ·  {side_emoji}  ·  10x  ·  100$  ·  15m\n"
-            f"Mavi kesik = EMA dip  |  Kırmızı kesik = EMA tepe  |  Giriş / TP / SL çizgileri",
+            f"Mavi kesik = EMA dip  |  Kırmızı kesik = EMA tepe",
             color=TEXT, fontsize=12, fontweight="bold", pad=10, loc="left"
         )
         _legend(ax1)
@@ -532,21 +519,11 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         ax2.plot(plot_df["kdj_k"], color=EMA5_C, linewidth=1.15, label="K")
         ax2.plot(plot_df["kdj_d"], color=EMA20_C, linewidth=1.15, label="D")
         ax2.plot(plot_df["kdj_j"], color=UP, linewidth=1.0, label="J", alpha=0.85)
-        ax2.axhline(80, color=MUTED, linestyle=":", linewidth=0.8)
-        ax2.axhline(20, color=MUTED, linestyle=":", linewidth=0.8)
-        ax2.fill_between(range(n), 80, 100, color=SHORT_C, alpha=0.06)
-        ax2.fill_between(range(n), 0, 20, color=LONG_C, alpha=0.06)
-        _legend(ax2)
 
         ax3 = fig.add_subplot(gs[2], sharex=ax1)
         _style_axes(ax3, "StochRSI")
         ax3.plot(plot_df["stochrsi_k"], color=EMA5_C, linewidth=1.15, label="K")
         ax3.plot(plot_df["stochrsi_d"], color=EMA20_C, linewidth=1.15, label="D")
-        ax3.axhline(80, color=MUTED, linestyle=":", linewidth=0.8)
-        ax3.axhline(20, color=MUTED, linestyle=":", linewidth=0.8)
-        ax3.fill_between(range(n), 80, 100, color=SHORT_C, alpha=0.06)
-        ax3.fill_between(range(n), 0, 20, color=LONG_C, alpha=0.06)
-        _legend(ax3)
 
         ax4 = fig.add_subplot(gs[3], sharex=ax1)
         _style_axes(ax4, "MACD")
@@ -554,27 +531,15 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         ax4.plot(plot_df["macd_dea"], color=DOWN, linewidth=1.15, label="DEA")
         hist_colors = [UP if v >= 0 else DOWN for v in plot_df["macd_hist"]]
         ax4.bar(range(n), plot_df["macd_hist"], color=hist_colors, width=0.65, alpha=0.65, zorder=2)
-        ax4.axhline(0, color=MUTED, linewidth=0.7)
-        _legend(ax4)
 
         ax5 = fig.add_subplot(gs[4], sharex=ax1)
         _style_axes(ax5, "RSI")
         ax5.plot(plot_df["rsi6"], color=EMA5_C, linewidth=1.15, label="RSI6")
         ax5.plot(plot_df["rsi14"], color=EMA20_C, linewidth=1.15, label="RSI14")
-        ax5.axhline(70, color=MUTED, linestyle=":", linewidth=0.8)
-        ax5.axhline(30, color=MUTED, linestyle=":", linewidth=0.8)
-        ax5.fill_between(range(n), 70, 100, color=SHORT_C, alpha=0.06)
-        ax5.fill_between(range(n), 0, 30, color=LONG_C, alpha=0.06)
-        _legend(ax5)
 
         ax6 = fig.add_subplot(gs[5], sharex=ax1)
         _style_axes(ax6, "Wm %R")
         ax6.plot(plot_df["williams_r"], color=EMA5_C, linewidth=1.2, label="Williams %R")
-        ax6.axhline(-20, color=MUTED, linestyle=":", linewidth=0.8)
-        ax6.axhline(-80, color=MUTED, linestyle=":", linewidth=0.8)
-        ax6.fill_between(range(n), -20, 0, color=SHORT_C, alpha=0.06)
-        ax6.fill_between(range(n), -100, -80, color=LONG_C, alpha=0.06)
-        _legend(ax6)
 
         _draw_extreme_vlines([ax2, ax3, ax4, ax5, ax6], extremes, n)
 
@@ -593,15 +558,10 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         return None
 
 
-# -------------------- Telegram --------------------
 class TelegramNotifier:
     def __init__(self):
         self.enabled = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID and "BURAYA" not in TELEGRAM_BOT_TOKEN)
         self.bot = Bot(token=TELEGRAM_BOT_TOKEN) if self.enabled else None
-        if self.enabled:
-            logger.info("Telegram aktif")
-        else:
-            logger.warning("Telegram token/chat_id eksik!")
 
     async def send(self, text: str):
         if not self.enabled:
@@ -613,30 +573,21 @@ class TelegramNotifier:
 
     async def send_startup(self, n_symbols: int = 20, symbols: Optional[List[str]] = None):
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        sym_txt = ", ".join((symbols or [])[:8])
-        if symbols and len(symbols) > 8:
-            sym_txt += f" … +{len(symbols)-8}"
         await self.send(
-            f"✅ <b>Bot başlatıldı</b>\n"
+            f"✅ <b>Senkronize Bot Başlatıldı</b>\n"
             f"📁 <code>{DOSYA_ADI}</code>\n"
-            f"Coin: <b>{n_symbols}</b> (Altın + Gümüş dahil)\n"
-            f"<code>{sym_txt}</code>\n"
-            f"Sanal cüzdan: <b>{VIRTUAL_BALANCE:.0f} USDT</b>\n"
-            f"İşlem: 100$ | Marj: {MARGIN_USD:.0f}$ | 10x | TF: 15m\n"
-            f"Pozisyon açılınca: grafik + Giriş/TP/SL\n"
-            f"Saatlik rapor: kar/zarar + cüzdan\n"
+            f"Coin Sayısı: <b>{n_symbols}</b>\n"
+            f"Sanal Cüzdan: <b>{VIRTUAL_BALANCE:.0f} USDT</b>\n"
             f"<code>{now}</code>"
         )
 
     async def send_new_position(self, pos: Position, chart_bytes: Optional[bytes] = None):
         emoji = "🟢" if pos.side == "LONG" else "🔴"
         caption = (
-            f"{emoji} <b>Yeni Sanal İşlem</b>\n\n"
+            f"{emoji} <b>Yeni Senkronize İşlem</b>\n\n"
             f"Sembol: <code>{pos.symbol}</code>\nYön: <b>{pos.side}</b>\n"
             f"Giriş: <code>{pos.entry_price:.6f}</code>\n"
-            f"TP: <code>{pos.tp:.6f}</code>\nSL: <code>{pos.sl:.6f}</code> (1.5×ATR)\n"
-            f"ATR: <code>{pos.atr:.6f}</code>\n"
-            f"İşlem: 100 USDT | Marj: {MARGIN_USD:.0f} USDT | 10x | 15m"
+            f"TP: <code>{pos.tp:.6f}</code> | SL: <code>{pos.sl:.6f}</code>"
         )
         if not self.enabled:
             return
@@ -651,53 +602,30 @@ class TelegramNotifier:
             else:
                 await self.send(caption)
         except Exception as e:
-            logger.error(f"Telegram grafik hatası: {e}")
-            await self.send(caption)
+            logger.error(f"Telegram gönderim hatası: {e}")
 
     async def send_closed(self, pos: Position, balance: float = 0.0, total_pnl: float = 0.0):
         emoji = "✅" if pos.pnl >= 0 else "❌"
         await self.send(
             f"{emoji} <b>Pozisyon Kapandı</b>\n\n"
             f"Sembol: <code>{pos.symbol}</code> | {pos.side}\n"
-            f"Giriş → Çıkış: <code>{pos.entry_price:.6f}</code> → <code>{pos.close_price:.6f}</code>\n"
-            f"Bu işlem PnL: <b>{pos.pnl:+.4f} USDT</b>\n"
+            f"PnL: <b>{pos.pnl:+.4f} USDT</b>\n"
             f"Sebep: <code>{pos.status}</code>\n"
-            f"Süre: {pos.open_time.strftime('%H:%M')} → {datetime.utcnow().strftime('%H:%M')} UTC\n"
-            f"────────────\n"
-            f"💰 Cüzdan: <b>{balance:.2f} USDT</b>\n"
-            f"📈 Toplam P&L: <b>{total_pnl:+.4f} USDT</b>"
+            f"💰 Cüzdan: <b>{balance:.2f} USDT</b>"
         )
 
     async def send_hourly(self, scanned: int, new_trades: int, open_pos: List[Position],
                           total_pnl: float, total_trades: int, balance: float = 2000.0):
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        
-        # Kârda mı zararda mı durumu
         durum_str = "🟢 Kârda" if total_pnl >= 0 else "🔴 Zararda"
-
-        lines = [
-            f"📊 <b>Saatlik Cüzdan Raporu</b> – <code>{DOSYA_ADI}</code>",
-            f"🕒 Zaman: <code>{now}</code>",
-            f"💰 Sanal cüzdan: <b>{balance:.2f} USDT</b>",
-            f"📈 Toplam P&L: <b>{total_pnl:+.4f} USDT</b> ({durum_str})",
-            f"🔄 Bu saatte açılan: <b>{new_trades}</b> | Toplam işlem: <b>{total_trades}</b>",
-            f"Aktif pozisyon: <b>{len(open_pos)}</b> / {scanned} coin",
-            ""
-        ]
-        if open_pos:
-            lines.append("📌 <b>Açık pozisyonlar ve anlık durum:</b>")
-            for i, p in enumerate(open_pos[:20], 1):
-                pnl_emoji = "🟩" if p.pnl >= 0 else "🟥"
-                lines.append(
-                    f"{i}. <code>{p.symbol}</code> **{p.side}**\n"
-                    f"   • Giriş: <code>{p.entry_price:.5f}</code> | TP: <code>{p.tp:.5f}</code> | SL: <code>{p.sl:.5f}</code>"
-                )
-        else:
-            lines.append("Aktif pozisyon bulunmuyor.")
-        await self.send("\n".join(lines))
+        await self.send(
+            f"📊 <b>Saatlik Rapor</b> – <code>{DOSYA_ADI}</code>\n"
+            f"🕒 Zaman: <code>{now}</code>\n"
+            f"💰 Cüzdan: <b>{balance:.2f} USDT</b> | P&L: <b>{total_pnl:+.4f} USDT</b> ({durum_str})\n"
+            f"Açık Pozisyon: <b>{len(open_pos)}</b>"
+        )
 
 
-# -------------------- Ana Bot --------------------
 class PRFBBot:
     def __init__(self):
         self.exchange = ccxt.binanceusdm({
@@ -711,7 +639,6 @@ class PRFBBot:
         self.last_scan_count = 0
         self.hourly_new_trades = 0
         self.sem = asyncio.Semaphore(5)
-        self.last_df: Optional[pd.DataFrame] = None
 
     async def load_markets(self):
         await self.exchange.load_markets()
@@ -720,15 +647,10 @@ class PRFBBot:
             if sym in self.exchange.markets:
                 self.symbols.append(sym)
             else:
-                alt = sym.replace("/USDT:USDT", "USDT").replace("/", "")
-                found = False
                 for m in self.exchange.markets:
-                    if m.replace("/", "").replace(":USDT", "") == alt.replace(":USDT", ""):
+                    if m.replace("/", "").replace(":USDT", "") == sym.replace("/USDT:USDT", "USDT").replace("/", ""):
                         self.symbols.append(m)
-                        found = True
                         break
-                if not found:
-                    logger.warning(f"Sembol bulunamadı: {sym}")
         if not self.symbols:
             self.symbols = ["XAG/USDT:USDT", "XAU/USDT:USDT"]
         logger.info(f"Yüklenen {len(self.symbols)} sembol: {self.symbols}")
@@ -753,7 +675,6 @@ class PRFBBot:
     async def run_scan(self):
         if not self.symbols:
             return
-        logger.info(f"Tarama başlıyor... {len(self.symbols)} çift (15m)")
         tasks = [self.scan_symbol(s) for s in self.symbols]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -768,7 +689,6 @@ class PRFBBot:
                 prices[symbol] = entry
             if df is not None:
                 dfs[symbol] = df
-                self.last_df = df
             if signal and atr > 0 and df is not None:
                 pos = self.trader.open_position(symbol, signal, entry, atr)
                 if pos:
@@ -787,7 +707,6 @@ class PRFBBot:
             )
 
         self.last_scan_count = len(self.symbols)
-        logger.info(f"Tarama bitti | Sembol:{len(self.symbols)} | Sinyal:{signals} | Açık:{len(self.trader.get_open_positions())}")
 
     async def scan_loop(self):
         while self.running:
@@ -816,7 +735,7 @@ class PRFBBot:
 
     async def start(self):
         logger.info("=" * 50)
-        logger.info(f"Peak Reversal Futures Bot | 20 coin | 15m | {DOSYA_ADI}")
+        logger.info(f"Senkronize Bot Başlatıldı | {DOSYA_ADI}")
         await self.load_markets()
         await self.notifier.send_startup(len(self.symbols), self.symbols)
         self.running = True
