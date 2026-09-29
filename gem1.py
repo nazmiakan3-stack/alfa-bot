@@ -78,6 +78,7 @@ RSI_FAST, RSI_SLOW = 6, 14
 ATR_PERIOD = 14
 WILLIAMS_PERIOD = 14
 SIGNAL_LOOKBACK = 4
+DOSYA_ADI = "gem1.py"
 # =====================================================
 
 logging.basicConfig(
@@ -126,7 +127,6 @@ class PaperTrader:
             return None
 
         quantity = NOTIONAL_USD / entry_price
-        # SL = 1.5 × ATR (kullanıcı isteği), TP = 2 × ATR
         if side == "LONG":
             tp = entry_price + (2.0 * atr)
             sl = entry_price - (1.5 * atr)
@@ -146,7 +146,6 @@ class PaperTrader:
         return pos
 
     def update_positions(self, prices: Dict[str, float], dfs: Optional[Dict[str, pd.DataFrame]] = None) -> List[Position]:
-        """Sadece TP / SL ile kapatma (EMA kesişim çıkışı kaldırıldı — gürültülü erken kapanma olmasın)"""
         closed_now = []
         still_open = []
         for pos in self.positions:
@@ -254,7 +253,6 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         ], axis=1).max(axis=1)
         df["atr"] = tr.ewm(alpha=1/ATR_PERIOD, min_periods=ATR_PERIOD, adjust=False).mean()
 
-        # EMA99 eğimi (son 5 mum)
         df["ema99_slope"] = df["ema99"].diff(5)
 
         return df
@@ -264,17 +262,12 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
 
 
 # -------------------- Signal Logic --------------------
-# Ana tetik: EMA5 tepe/dip
-# Diğer indikatörler ±2 mum içinde şartı sağlarsa pozisyon açılır
-
 def _ema5_at_bottom(df: pd.DataFrame, idx: int) -> bool:
-    """EMA5 lokal dip + net yukarı dönüş (düşerken LONG açılmaz)"""
     if idx < 3:
         return False
     e = df["ema5"]
     start = max(0, idx - 8)
     at_low = e.iloc[idx] <= e.iloc[start:idx + 1].min() * 1.002
-    # Net yükseliş zorunlu (önceki mumdan yüksek)
     rising = e.iloc[idx] > e.iloc[idx - 1]
     is_pivot = e.iloc[idx] <= e.iloc[idx - 1] and e.iloc[idx] <= e.iloc[idx - 2]
     if idx < len(df) - 1:
@@ -283,7 +276,6 @@ def _ema5_at_bottom(df: pd.DataFrame, idx: int) -> bool:
 
 
 def _ema5_at_top(df: pd.DataFrame, idx: int) -> bool:
-    """EMA5 lokal tepe + net aşağı dönüş (yükselirken SHORT açılmaz)"""
     if idx < 3:
         return False
     e = df["ema5"]
@@ -329,14 +321,12 @@ def _will_short_ok(row) -> bool:
 
 
 def _macd_long_ok(df: pd.DataFrame, idx: int) -> bool:
-    """DIF aşağıdan yukarı DEA kesiyor (bu mum veya 1-2 önceki)"""
     for j in range(max(1, idx - 2), idx + 1):
         if j < 1:
             continue
         c, p = df.iloc[j], df.iloc[j - 1]
         if p["macd_dif"] <= p["macd_dea"] and c["macd_dif"] > c["macd_dea"]:
             return True
-        # hist negatiften pozitife / yükseliyor
         if c["macd_hist"] > p["macd_hist"] and p["macd_hist"] <= 0.02:
             return True
     return False
@@ -355,7 +345,6 @@ def _macd_short_ok(df: pd.DataFrame, idx: int) -> bool:
 
 
 def _any_in_window(df: pd.DataFrame, idx: int, check_fn, window: int = 2) -> bool:
-    """±window mum içinde check_fn True ise OK"""
     for j in range(max(0, idx - window), min(len(df), idx + window + 1)):
         if check_fn(df.iloc[j]):
             return True
@@ -363,16 +352,8 @@ def _any_in_window(df: pd.DataFrame, idx: int, check_fn, window: int = 2) -> boo
 
 
 def check_long(df: pd.DataFrame, idx: int) -> bool:
-    """
-    LONG:
-    1) EMA5 en dipte + dolmaya başlamış (ana tetik)
-    2) KDJ 0-25, StochRSI 0-35, RSI 0-35, Williams -100/-65
-       → bunlar ±2 mum içinde sağlanabilir
-    3) MACD DIF↑DEA veya hist yukarı (±2 mum)
-    """
     if idx < 3:
         return False
-
     if not _ema5_at_bottom(df, idx):
         return False
 
@@ -382,22 +363,13 @@ def check_long(df: pd.DataFrame, idx: int) -> bool:
     will_ok = _any_in_window(df, idx, _will_long_ok, 2)
     macd_ok = _macd_long_ok(df, idx)
 
-    # En az 3 yan şart + MACD (toplam esnek ama anlamlı)
     side_score = sum([kdj_ok, stoch_ok, rsi_ok, will_ok, macd_ok])
     return side_score >= 3
 
 
 def check_short(df: pd.DataFrame, idx: int) -> bool:
-    """
-    SHORT:
-    1) EMA5 en tepede + düşmeye başlamış (ana tetik)
-    2) KDJ 75-100, StochRSI 65-100, RSI 65-100, Williams -35/0
-       → ±2 mum içinde
-    3) MACD DIF↓DEA veya hist aşağı (±2 mum)
-    """
     if idx < 3:
         return False
-
     if not _ema5_at_top(df, idx):
         return False
 
@@ -414,7 +386,6 @@ def check_short(df: pd.DataFrame, idx: int) -> bool:
 def detect_signal(df: pd.DataFrame) -> Optional[str]:
     if df is None or len(df) < 30:
         return None
-    # Son 6 muma bak (±2 + biraz pay)
     start = max(len(df) - 1 - 6, 3)
     for idx in range(len(df) - 1, start - 1, -1):
         if check_long(df, idx):
@@ -424,19 +395,7 @@ def detect_signal(df: pd.DataFrame) -> Optional[str]:
     return None
 
 
-def find_signal_indices(df: pd.DataFrame, lookback: int = 96) -> Dict[str, List[int]]:
-    longs, shorts = [], []
-    start = max(3, len(df) - lookback)
-    for idx in range(start, len(df)):
-        if check_long(df, idx):
-            longs.append(idx - start)
-        if check_short(df, idx):
-            shorts.append(idx - start)
-    return {"long": longs, "short": shorts}
-
-
 def find_ema_extremes(df: pd.DataFrame, lookback: int = 96) -> Dict[str, List[int]]:
-    """Grafikte EMA5 tepe/dip noktalarını işaretlemek için"""
     bottoms, tops = [], []
     start = max(3, len(df) - lookback)
     for idx in range(start, len(df)):
@@ -447,7 +406,7 @@ def find_ema_extremes(df: pd.DataFrame, lookback: int = 96) -> Dict[str, List[in
     return {"bottoms": bottoms, "tops": tops}
 
 
-# -------------------- Charts (Profesyonel stil) --------------------
+# -------------------- Charts --------------------
 BG = "#131722"
 PANEL = "#1a1e2e"
 GRID = "#2a2e39"
@@ -525,13 +484,10 @@ def _legend(ax):
 
 
 def _draw_levels(ax, entry: float, tp: float, sl: float, side: str = ""):
-    """Giriş / TP / SL yatay çizgi + sağda etiket"""
     n_right = ax.get_xlim()[1] if ax.get_xlim()[1] > 1 else 95
-    # Çizgiler
     ax.axhline(entry, color=ENTRY_C, linestyle="-", linewidth=1.5, alpha=0.95, zorder=5)
     ax.axhline(tp, color=TP_C, linestyle="-", linewidth=1.6, alpha=0.95, zorder=5)
     ax.axhline(sl, color=SL_C, linestyle="-", linewidth=1.6, alpha=0.95, zorder=5)
-    # Etiketler (sağ kenar)
     x_lab = n_right - 1
     bbox = dict(boxstyle="round,pad=0.25", facecolor="#1e2330", edgecolor="#363a45", alpha=0.92)
     ax.annotate(f"GİRİŞ  {entry:.4f}", xy=(x_lab, entry), xytext=(8, 0),
@@ -543,7 +499,6 @@ def _draw_levels(ax, entry: float, tp: float, sl: float, side: str = ""):
     ax.annotate(f"SL  {sl:.4f}", xy=(x_lab, sl), xytext=(8, 0),
                 textcoords="offset points", color=SL_C, fontsize=8, fontweight="bold",
                 va="center", ha="left", bbox=bbox, zorder=7)
-    # Legend için de ekle
     ax.plot([], [], color=ENTRY_C, linewidth=1.5, label=f"Giriş {entry:.4f}")
     ax.plot([], [], color=TP_C, linewidth=1.5, label=f"TP {tp:.4f}")
     ax.plot([], [], color=SL_C, linewidth=1.5, label=f"SL {sl:.4f}")
@@ -558,12 +513,11 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         fig = plt.figure(figsize=(15, 17), facecolor=BG)
         gs = fig.add_gridspec(6, 1, height_ratios=[3.4, 1.05, 1.05, 1.1, 1.05, 1.0], hspace=0.06)
 
-        # --- Fiyat ---
         ax1 = fig.add_subplot(gs[0])
         _style_axes(ax1)
         _draw_candles(ax1, plot_df)
         _draw_ema_lines(ax1, plot_df, extremes)
-        ax1.set_xlim(-1, n + 12)  # etiketler için sağda boşluk
+        ax1.set_xlim(-1, n + 12)
         _draw_levels(ax1, pos.entry_price, pos.tp, pos.sl, pos.side)
         side_emoji = "LONG ▲" if pos.side == "LONG" else "SHORT ▼"
         ax1.set_title(
@@ -573,7 +527,6 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         )
         _legend(ax1)
 
-        # --- KDJ ---
         ax2 = fig.add_subplot(gs[1], sharex=ax1)
         _style_axes(ax2, "KDJ")
         ax2.plot(plot_df["kdj_k"], color=EMA5_C, linewidth=1.15, label="K")
@@ -585,7 +538,6 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         ax2.fill_between(range(n), 0, 20, color=LONG_C, alpha=0.06)
         _legend(ax2)
 
-        # --- StochRSI ---
         ax3 = fig.add_subplot(gs[2], sharex=ax1)
         _style_axes(ax3, "StochRSI")
         ax3.plot(plot_df["stochrsi_k"], color=EMA5_C, linewidth=1.15, label="K")
@@ -596,7 +548,6 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         ax3.fill_between(range(n), 0, 20, color=LONG_C, alpha=0.06)
         _legend(ax3)
 
-        # --- MACD ---
         ax4 = fig.add_subplot(gs[3], sharex=ax1)
         _style_axes(ax4, "MACD")
         ax4.plot(plot_df["macd_dif"], color=UP, linewidth=1.15, label="DIF")
@@ -606,7 +557,6 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         ax4.axhline(0, color=MUTED, linewidth=0.7)
         _legend(ax4)
 
-        # --- RSI ---
         ax5 = fig.add_subplot(gs[4], sharex=ax1)
         _style_axes(ax5, "RSI")
         ax5.plot(plot_df["rsi6"], color=EMA5_C, linewidth=1.15, label="RSI6")
@@ -617,7 +567,6 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         ax5.fill_between(range(n), 0, 30, color=LONG_C, alpha=0.06)
         _legend(ax5)
 
-        # --- Williams ---
         ax6 = fig.add_subplot(gs[5], sharex=ax1)
         _style_axes(ax6, "Wm %R")
         ax6.plot(plot_df["williams_r"], color=EMA5_C, linewidth=1.2, label="Williams %R")
@@ -641,105 +590,6 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         return buf.read()
     except Exception as e:
         logger.error(f"Sinyal grafik hatası: {e}")
-        return None
-
-
-def create_indicator_chart(df: pd.DataFrame, symbol: str, open_positions: Optional[List] = None) -> Optional[bytes]:
-    try:
-        plot_df = df.tail(96).copy().reset_index(drop=True)
-        last_close = float(plot_df["close"].iloc[-1])
-        last_atr = float(plot_df["atr"].iloc[-1]) if pd.notna(plot_df["atr"].iloc[-1]) else 0.0
-        extremes = find_ema_extremes(df, lookback=96)
-        n = len(plot_df)
-
-        fig = plt.figure(figsize=(15, 17), facecolor=BG)
-        gs = fig.add_gridspec(6, 1, height_ratios=[3.4, 1.05, 1.05, 1.1, 1.05, 1.0], hspace=0.06)
-
-        ax1 = fig.add_subplot(gs[0])
-        _style_axes(ax1)
-        _draw_candles(ax1, plot_df)
-        _draw_ema_lines(ax1, plot_df, extremes)
-
-        # Açık pozisyon varsa Giriş / TP / SL göster
-        title_extra = "Mavi kesik = EMA dip  |  Kırmızı kesik = EMA tepe"
-        if open_positions:
-            ax1.set_xlim(-1, n + 12)
-            for p in open_positions:
-                if getattr(p, "symbol", "") == symbol or True:
-                    _draw_levels(ax1, p.entry_price, p.tp, p.sl, p.side)
-                    title_extra = f"Giriş {p.entry_price:.4f}  |  TP {p.tp:.4f}  |  SL {p.sl:.4f}"
-                    break
-
-        ax1.set_title(
-            f"{symbol}  ·  {last_close:.4f}  ·  ATR {last_atr:.4f}  ·  15m  ·  ~1 gün\n"
-            f"{title_extra}",
-            color=TEXT, fontsize=12, fontweight="bold", pad=10, loc="left"
-        )
-        _legend(ax1)
-
-        ax2 = fig.add_subplot(gs[1], sharex=ax1)
-        _style_axes(ax2, "KDJ")
-        ax2.plot(plot_df["kdj_k"], color=EMA5_C, linewidth=1.15, label="K")
-        ax2.plot(plot_df["kdj_d"], color=EMA20_C, linewidth=1.15, label="D")
-        ax2.plot(plot_df["kdj_j"], color=UP, linewidth=1.0, label="J", alpha=0.85)
-        ax2.axhline(80, color=MUTED, linestyle=":", linewidth=0.8)
-        ax2.axhline(20, color=MUTED, linestyle=":", linewidth=0.8)
-        ax2.fill_between(range(n), 80, 100, color=SHORT_C, alpha=0.06)
-        ax2.fill_between(range(n), 0, 20, color=LONG_C, alpha=0.06)
-        _legend(ax2)
-
-        ax3 = fig.add_subplot(gs[2], sharex=ax1)
-        _style_axes(ax3, "StochRSI")
-        ax3.plot(plot_df["stochrsi_k"], color=EMA5_C, linewidth=1.15, label="K")
-        ax3.plot(plot_df["stochrsi_d"], color=EMA20_C, linewidth=1.15, label="D")
-        ax3.axhline(80, color=MUTED, linestyle=":", linewidth=0.8)
-        ax3.axhline(20, color=MUTED, linestyle=":", linewidth=0.8)
-        ax3.fill_between(range(n), 80, 100, color=SHORT_C, alpha=0.06)
-        ax3.fill_between(range(n), 0, 20, color=LONG_C, alpha=0.06)
-        _legend(ax3)
-
-        ax4 = fig.add_subplot(gs[3], sharex=ax1)
-        _style_axes(ax4, "MACD")
-        ax4.plot(plot_df["macd_dif"], color=UP, linewidth=1.15, label="DIF")
-        ax4.plot(plot_df["macd_dea"], color=DOWN, linewidth=1.15, label="DEA")
-        hist_colors = [UP if v >= 0 else DOWN for v in plot_df["macd_hist"]]
-        ax4.bar(range(n), plot_df["macd_hist"], color=hist_colors, width=0.65, alpha=0.65, zorder=2)
-        ax4.axhline(0, color=MUTED, linewidth=0.7)
-        _legend(ax4)
-
-        ax5 = fig.add_subplot(gs[4], sharex=ax1)
-        _style_axes(ax5, "RSI")
-        ax5.plot(plot_df["rsi6"], color=EMA5_C, linewidth=1.15, label="RSI6")
-        ax5.plot(plot_df["rsi14"], color=EMA20_C, linewidth=1.15, label="RSI14")
-        ax5.axhline(70, color=MUTED, linestyle=":", linewidth=0.8)
-        ax5.axhline(30, color=MUTED, linestyle=":", linewidth=0.8)
-        ax5.fill_between(range(n), 70, 100, color=SHORT_C, alpha=0.06)
-        ax5.fill_between(range(n), 0, 30, color=LONG_C, alpha=0.06)
-        _legend(ax5)
-
-        ax6 = fig.add_subplot(gs[5], sharex=ax1)
-        _style_axes(ax6, "Wm %R")
-        ax6.plot(plot_df["williams_r"], color=EMA5_C, linewidth=1.2, label="Williams %R")
-        ax6.axhline(-20, color=MUTED, linestyle=":", linewidth=0.8)
-        ax6.axhline(-80, color=MUTED, linestyle=":", linewidth=0.8)
-        ax6.fill_between(range(n), -20, 0, color=SHORT_C, alpha=0.06)
-        ax6.fill_between(range(n), -100, -80, color=LONG_C, alpha=0.06)
-        _legend(ax6)
-
-        _draw_extreme_vlines([ax2, ax3, ax4, ax5, ax6], extremes, n)
-
-        for ax in [ax1, ax2, ax3, ax4, ax5]:
-            plt.setp(ax.get_xticklabels(), visible=False)
-        ax6.tick_params(axis="x", labelsize=7)
-
-        fig.tight_layout(pad=0.6)
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png", dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor(), edgecolor="none")
-        plt.close(fig)
-        buf.seek(0)
-        return buf.read()
-    except Exception as e:
-        logger.error(f"İndikatör grafik hatası: {e}")
         return None
 
 
@@ -768,14 +618,13 @@ class TelegramNotifier:
             sym_txt += f" … +{len(symbols)-8}"
         await self.send(
             f"✅ <b>Bot başlatıldı</b>\n"
-            f"📁 <code>gem1_final.py</code>\n"
+            f"📁 <code>{DOSYA_ADI}</code>\n"
             f"Coin: <b>{n_symbols}</b> (Altın + Gümüş dahil)\n"
             f"<code>{sym_txt}</code>\n"
             f"Sanal cüzdan: <b>{VIRTUAL_BALANCE:.0f} USDT</b>\n"
             f"İşlem: 100$ | Marj: {MARGIN_USD:.0f}$ | 10x | TF: 15m\n"
             f"Pozisyon açılınca: grafik + Giriş/TP/SL\n"
             f"Saatlik rapor: kar/zarar + cüzdan\n"
-            f"15 dk grafik <b>kapalı</b>\n"
             f"<code>{now}</code>"
         )
 
@@ -822,42 +671,30 @@ class TelegramNotifier:
     async def send_hourly(self, scanned: int, new_trades: int, open_pos: List[Position],
                           total_pnl: float, total_trades: int, balance: float = 2000.0):
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        
+        # Kârda mı zararda mı durumu
+        durum_str = "🟢 Kârda" if total_pnl >= 0 else "🔴 Zararda"
+
         lines = [
-            f"📊 <b>Saatlik Cüzdan Raporu</b> – {now}",
+            f"📊 <b>Saatlik Cüzdan Raporu</b> – <code>{DOSYA_ADI}</code>",
+            f"🕒 Zaman: <code>{now}</code>",
             f"💰 Sanal cüzdan: <b>{balance:.2f} USDT</b>",
-            f"📈 Toplam P&L: <b>{total_pnl:+.4f} USDT</b>",
-            f"Bu saatte açılan: <b>{new_trades}</b> | Toplam işlem: <b>{total_trades}</b>",
+            f"📈 Toplam P&L: <b>{total_pnl:+.4f} USDT</b> ({durum_str})",
+            f"🔄 Bu saatte açılan: <b>{new_trades}</b> | Toplam işlem: <b>{total_trades}</b>",
             f"Aktif pozisyon: <b>{len(open_pos)}</b> / {scanned} coin",
             ""
         ]
         if open_pos:
-            lines.append("<b>Açık pozisyonlar:</b>")
+            lines.append("📌 <b>Açık pozisyonlar ve anlık durum:</b>")
             for i, p in enumerate(open_pos[:20], 1):
+                pnl_emoji = "🟩" if p.pnl >= 0 else "🟥"
                 lines.append(
-                    f"{i}. <code>{p.symbol}</code> {p.side}\n"
-                    f"   Giriş {p.entry_price:.5f} | TP {p.tp:.5f} | SL {p.sl:.5f}"
+                    f"{i}. <code>{p.symbol}</code> **{p.side}**\n"
+                    f"   • Giriş: <code>{p.entry_price:.5f}</code> | TP: <code>{p.tp:.5f}</code> | SL: <code>{p.sl:.5f}</code>"
                 )
         else:
-            lines.append("Açık pozisyon yok.")
+            lines.append("Aktif pozisyon bulunmuyor.")
         await self.send("\n".join(lines))
-
-    async def send_indicator_chart(self, chart_bytes: bytes, symbol: str, price: float):
-        if not self.enabled or not chart_bytes:
-            return
-        caption = (
-            f"📈 <b>15m İndikatör Grafiği (~1 gün)</b>\n"
-            f"Sembol: <code>{symbol}</code> | Fiyat: <code>{price:.4f}</code>\n"
-            f"Mavi kesik çizgi = EMA DİP | Kırmızı kesik çizgi = EMA TEPE"
-        )
-        try:
-            await self.bot.send_photo(
-                chat_id=TELEGRAM_CHAT_ID,
-                photo=InputFile(io.BytesIO(chart_bytes), filename="indicators.png"),
-                caption=caption,
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.error(f"Grafik gönderme hatası: {e}")
 
 
 # -------------------- Ana Bot --------------------
@@ -883,7 +720,6 @@ class PRFBBot:
             if sym in self.exchange.markets:
                 self.symbols.append(sym)
             else:
-                # alternatif isimler dene
                 alt = sym.replace("/USDT:USDT", "USDT").replace("/", "")
                 found = False
                 for m in self.exchange.markets:
@@ -972,7 +808,7 @@ class PRFBBot:
                     self.last_scan_count, new,
                     self.trader.get_open_positions(),
                     stats["total_pnl"], stats["total_trades"],
-                    stats.get("balance", 1000.0)
+                    stats.get("balance", 2000.0)
                 )
             except Exception as e:
                 logger.error(f"Rapor hatası: {e}")
@@ -980,7 +816,7 @@ class PRFBBot:
 
     async def start(self):
         logger.info("=" * 50)
-        logger.info("Peak Reversal Futures Bot | 20 coin | 15m | gem1_final.py")
+        logger.info(f"Peak Reversal Futures Bot | 20 coin | 15m | {DOSYA_ADI}")
         await self.load_markets()
         await self.notifier.send_startup(len(self.symbols), self.symbols)
         self.running = True
