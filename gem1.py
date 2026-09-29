@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Peak Reversal Futures Bot - TEK DOSYA VERSİYONU (gem1.py)
-Sadece XAGUSDT ve diğer tanımlı pariteler taranır.
+Açık pozisyon detaylı saatlik raporlama ve sinyal senkronizasyonu ile güncellenmiştir.
 Contabo / Termius için optimize edilmiştir.
 """
 
@@ -129,7 +129,7 @@ class PaperTrader:
         logger.info(f"SANAL AÇILDI | {side} {symbol} | 10x | 100$ | Marj:{MARGIN_USD:.0f}$ | Bakiye:{self.balance:.2f}")
         return pos
 
-    def update_positions(self, prices: Dict[str, float], dfs: Optional[Dict[str, pd.DataFrame]] = None) -> List[Position]:
+    def update_positions(self, prices: Dict[str, float]) -> List[Position]:
         closed_now = []
         still_open = []
         for pos in self.positions:
@@ -380,11 +380,6 @@ def detect_signal(df: pd.DataFrame) -> Optional[str]:
 
 
 def find_ema_extremes(df: pd.DataFrame, lookback: int = 96) -> Dict[str, List[int]]:
-    """
-    Artık sadece EMA5 dip/tepe noktalarını değil, doğrudan botun işlem açtığı 
-    (check_long / check_short koşullarını sağlayan) gerçek sinyal noktalarını işaretler.
-    Böylece grafik ile bot kararları %100 senkronize olur.
-    """
     bottoms, tops = [], []
     start = max(3, len(df) - lookback)
     for idx in range(start, len(df)):
@@ -614,15 +609,37 @@ class TelegramNotifier:
         )
 
     async def send_hourly(self, scanned: int, new_trades: int, open_pos: List[Position],
-                          total_pnl: float, total_trades: int, balance: float = 2000.0):
+                          total_pnl: float, total_trades: int, balance: float = 2000.0, prices: Optional[Dict[str, float]] = None):
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         durum_str = "🟢 Kârda" if total_pnl >= 0 else "🔴 Zararda"
-        await self.send(
+        
+        report = (
             f"📊 <b>Saatlik Rapor</b> – <code>{DOSYA_ADI}</code>\n"
             f"🕒 Zaman: <code>{now}</code>\n"
             f"💰 Cüzdan: <b>{balance:.2f} USDT</b> | P&L: <b>{total_pnl:+.4f} USDT</b> ({durum_str})\n"
-            f"Açık Pozisyon: <b>{len(open_pos)}</b>"
+            f"Açık Pozisyon Sayısı: <b>{len(open_pos)}</b>\n\n"
+            f"<b>📋 Açık Pozisyon Detayları:</b>\n"
         )
+        
+        if not open_pos:
+            report += "<i>Açık pozisyon bulunmuyor.</i>"
+        else:
+            for pos in open_pos:
+                curr_price = prices.get(pos.symbol, pos.entry_price) if prices else pos.entry_price
+                if pos.side == "LONG":
+                    pos_pnl = (curr_price - pos.entry_price) * pos.quantity
+                else:
+                    pos_pnl = (pos.entry_price - curr_price) * pos.quantity
+                
+                pnl_emoji = "🟢" if pos_pnl >= 0 else "🔴"
+                report += (
+                    f"{pnl_emoji} <code>{pos.symbol}</code> | <b>{pos.side}</b>\n"
+                    f"├ Fiyat: <code>{curr_price:.4f}</code> (Giriş: {pos.entry_price:.4f})\n"
+                    f"├ Tutar: <b>{pos.notional}$</b> (Marj: {pos.margin}$)\n"
+                    f"└ PnL: <b>{pos_pnl:+.4f} USDT</b>\n\n"
+                )
+                
+        await self.send(report)
 
 
 class PRFBBot:
@@ -637,6 +654,7 @@ class PRFBBot:
         self.running = False
         self.last_scan_count = 0
         self.hourly_new_trades = 0
+        self.latest_prices: Dict[str, float] = {}
         self.sem = asyncio.Semaphore(5)
 
     async def load_markets(self):
@@ -696,7 +714,8 @@ class PRFBBot:
                     chart = create_signal_chart(df, pos)
                     await self.notifier.send_new_position(pos, chart)
 
-        closed = self.trader.update_positions(prices, dfs)
+        self.latest_prices = prices
+        closed = self.trader.update_positions(prices)
         stats = self.trader.get_stats()
         for pos in closed:
             await self.notifier.send_closed(
@@ -726,7 +745,8 @@ class PRFBBot:
                     self.last_scan_count, new,
                     self.trader.get_open_positions(),
                     stats["total_pnl"], stats["total_trades"],
-                    stats.get("balance", 2000.0)
+                    stats.get("balance", 2000.0),
+                    prices=self.latest_prices
                 )
             except Exception as e:
                 logger.error(f"Rapor hatası: {e}")
