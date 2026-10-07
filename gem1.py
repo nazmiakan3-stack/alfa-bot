@@ -498,26 +498,18 @@ def _draw_ema_lines(ax, plot_df):
     ax.plot(plot_df["ema99"], color=EMA99_C, linewidth=1.3, label="EMA99", zorder=4, alpha=0.9)
 
 
-def _draw_signal_vlines(axes, signals: dict, plot_df, n: int, price_ax=None):
-    """
-    Sadece onaylı sinyal noktaları:
-    - Mavi kesik = LONG (EMA5 dip + göstergeler aşırı dip)
-    - Kırmızı kesik = SHORT (EMA5 tepe + göstergeler aşırı tepe)
-    """
-    for x in signals.get("long", []):
-        if 0 <= x < n:
-            for ax in axes:
-                ax.axvline(x, color=LONG_C, linestyle="--", linewidth=1.3, alpha=0.85, zorder=1)
-            if price_ax is not None:
-                price_ax.scatter(x, plot_df["ema5"].iloc[x], marker="^", s=70, color=LONG_C,
-                                 edgecolors="white", linewidths=0.7, zorder=6)
-    for x in signals.get("short", []):
-        if 0 <= x < n:
-            for ax in axes:
-                ax.axvline(x, color=SHORT_C, linestyle="--", linewidth=1.3, alpha=0.85, zorder=1)
-            if price_ax is not None:
-                price_ax.scatter(x, plot_df["ema5"].iloc[x], marker="v", s=70, color=SHORT_C,
-                                 edgecolors="white", linewidths=0.7, zorder=6)
+def _draw_entry_marker(axes, plot_df, n: int, side: str, price_ax=None, entry_idx: Optional[int] = None):
+    """Sadece BU işlemin giriş noktası — tek kesik çizgi (geçmiş sinyaller yok)."""
+    x = entry_idx if entry_idx is not None else (n - 1)
+    if x < 0 or x >= n:
+        x = n - 1
+    color = LONG_C if side == "LONG" else SHORT_C
+    for ax in axes:
+        ax.axvline(x, color=color, linestyle="--", linewidth=1.6, alpha=0.9, zorder=1)
+    if price_ax is not None:
+        marker = "^" if side == "LONG" else "v"
+        price_ax.scatter(x, plot_df["close"].iloc[x], marker=marker, s=100, color=color,
+                         edgecolors="white", linewidths=0.9, zorder=7)
 
 
 def _legend(ax):
@@ -554,7 +546,6 @@ def _draw_levels(ax, entry: float, tp: float, sl: float, side: str = ""):
 def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
     try:
         plot_df = df.tail(96).copy().reset_index(drop=True)
-        signals = find_signal_indices(df, lookback=96)
         n = len(plot_df)
 
         fig = plt.figure(figsize=(15, 17), facecolor=BG)
@@ -564,12 +555,12 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         _style_axes(ax1)
         _draw_candles(ax1, plot_df)
         _draw_ema_lines(ax1, plot_df)
-        ax1.set_xlim(-1, n + 12)
+        ax1.set_xlim(-1, n + 14)
         _draw_levels(ax1, pos.entry_price, pos.tp, pos.sl, pos.side)
         side_emoji = "LONG ▲" if pos.side == "LONG" else "SHORT ▼"
         ax1.set_title(
             f"{pos.symbol}  ·  {side_emoji}  ·  10x  ·  100$  ·  15m\n"
-            f"Mavi kesik = Onaylı LONG  |  Kırmızı kesik = Onaylı SHORT  |  Giriş/TP/SL",
+            f"Kesik çizgi = Giriş  |  Yeşil = TP  |  Turuncu = SL",
             color=TEXT, fontsize=12, fontweight="bold", pad=10, loc="left"
         )
         _legend(ax1)
@@ -623,9 +614,9 @@ def create_signal_chart(df: pd.DataFrame, pos: "Position") -> Optional[bytes]:
         ax6.fill_between(range(n), -100, -80, color=LONG_C, alpha=0.06)
         _legend(ax6)
 
-        # Sadece onaylı LONG/SHORT giriş noktaları
+        # Tek giriş çizgisi (bu pozisyon)
         all_axes = [ax1, ax2, ax3, ax4, ax5, ax6]
-        _draw_signal_vlines(all_axes, signals, plot_df, n, price_ax=ax1)
+        _draw_entry_marker(all_axes, plot_df, n, pos.side, price_ax=ax1, entry_idx=n - 1)
 
         for ax in [ax1, ax2, ax3, ax4, ax5]:
             plt.setp(ax.get_xticklabels(), visible=False)
@@ -647,7 +638,6 @@ def create_indicator_chart(df: pd.DataFrame, symbol: str, open_positions: Option
         plot_df = df.tail(96).copy().reset_index(drop=True)
         last_close = float(plot_df["close"].iloc[-1])
         last_atr = float(plot_df["atr"].iloc[-1]) if pd.notna(plot_df["atr"].iloc[-1]) else 0.0
-        signals = find_signal_indices(df, lookback=96)
         n = len(plot_df)
 
         fig = plt.figure(figsize=(15, 17), facecolor=BG)
@@ -658,12 +648,14 @@ def create_indicator_chart(df: pd.DataFrame, symbol: str, open_positions: Option
         _draw_candles(ax1, plot_df)
         _draw_ema_lines(ax1, plot_df)
 
-        title_extra = "Mavi kesik = Onaylı LONG  |  Kırmızı kesik = Onaylı SHORT"
+        title_extra = "Temiz görünüm — sadece EMA + göstergeler"
+        open_side = None
         if open_positions:
-            ax1.set_xlim(-1, n + 12)
+            ax1.set_xlim(-1, n + 14)
             for p in open_positions:
                 _draw_levels(ax1, p.entry_price, p.tp, p.sl, p.side)
                 title_extra = f"Giriş {p.entry_price:.4f}  |  TP {p.tp:.4f}  |  SL {p.sl:.4f}"
+                open_side = p.side
                 break
 
         ax1.set_title(
@@ -722,8 +714,10 @@ def create_indicator_chart(df: pd.DataFrame, symbol: str, open_positions: Option
         ax6.fill_between(range(n), -100, -80, color=LONG_C, alpha=0.06)
         _legend(ax6)
 
-        all_axes = [ax1, ax2, ax3, ax4, ax5, ax6]
-        _draw_signal_vlines(all_axes, signals, plot_df, n, price_ax=ax1)
+        # Açık pozisyon varsa sadece o giriş çizgisi
+        if open_side:
+            all_axes = [ax1, ax2, ax3, ax4, ax5, ax6]
+            _draw_entry_marker(all_axes, plot_df, n, open_side, price_ax=ax1, entry_idx=n - 1)
 
         for ax in [ax1, ax2, ax3, ax4, ax5]:
             plt.setp(ax.get_xticklabels(), visible=False)
