@@ -1,21 +1,12 @@
 #!/usr/bin/env python3
 """
-Peak Reversal Futures Bot - TEK DOSYA VERSİYONU (gem1.py)
-Sadece XAGUSDT taranır.
-Contabo / Termius için optimize edilmiştir.
+Peak Reversal Futures Bot - TEK DOSYA (gem1.py)
+20 coin (XAU + XAG dahil) | 15m | Sanal paper trading
+Contabo / Termius için optimize.
 
-Güncel Mantık (2026-09-26):
-LONG:
-  - EMA5 en düşük noktada + dolmaya başlamış (EMA20 kesişimi YOK)
-  - KDJ 0-20 | StochRSI 0-30 | RSI 0-30
-  - MACD: DIF aşağıdan yukarı DEA kesiyor
-  - Williams %R: -100 ile -70 arası
-SHORT:
-  - EMA5 en yüksek noktada + düşmeye başlamış
-  - KDJ 80-100 | StochRSI 70-100 | RSI 70-100
-  - MACD: DIF yukarıdan aşağı DEA kesiyor
-  - Williams %R: -30 ile 0 arası
-Çıkış: TP/SL veya EMA5/EMA20 ters kesişim | SL=1.5ATR | TP=2ATR
+LONG : EMA5 dip + yükseliş | KDJ/Stoch/RSI/Williams aşırı satım | MACD↑
+SHORT: EMA5 tepe + düşüş  | KDJ/Stoch/RSI/Williams aşırı alım  | MACD↓
+Çıkış: sadece TP (2×ATR) / SL (1.5×ATR)
 """
 
 import asyncio
@@ -39,6 +30,7 @@ from telegram.constants import ParseMode
 # ====================== AYARLAR ======================
 TELEGRAM_BOT_TOKEN = "8680932537:AAHcV1npqk0H0MunNdvfchlurdEOfEaCgw4"
 TELEGRAM_CHAT_ID = "1734551753"
+BOT_FILENAME = "gem1.py"   # Tüm Telegram mesajlarında görünür
 
 LEVERAGE = 10
 NOTIONAL_USD = 100.0
@@ -759,7 +751,7 @@ class TelegramNotifier:
             sym_txt += f" … +{len(symbols)-8}"
         await self.send(
             f"✅ <b>Bot başlatıldı</b>\n"
-            f"📁 <code>gem1_final.py</code>\n"
+            f"📁 Dosya: <code>{BOT_FILENAME}</code>\n"
             f"Coin: <b>{n_symbols}</b> (Altın + Gümüş dahil)\n"
             f"<code>{sym_txt}</code>\n"
             f"Sanal cüzdan: <b>{VIRTUAL_BALANCE:.0f} USDT</b>\n"
@@ -773,7 +765,8 @@ class TelegramNotifier:
     async def send_new_position(self, pos: Position, chart_bytes: Optional[bytes] = None):
         emoji = "🟢" if pos.side == "LONG" else "🔴"
         caption = (
-            f"{emoji} <b>Yeni Sanal İşlem</b>\n\n"
+            f"{emoji} <b>Yeni Sanal İşlem</b>\n"
+            f"📁 <code>{BOT_FILENAME}</code>\n\n"
             f"Sembol: <code>{pos.symbol}</code>\nYön: <b>{pos.side}</b>\n"
             f"Giriş: <code>{pos.entry_price:.6f}</code>\n"
             f"TP: <code>{pos.tp:.6f}</code>\nSL: <code>{pos.sl:.6f}</code> (1.5×ATR)\n"
@@ -799,7 +792,8 @@ class TelegramNotifier:
     async def send_closed(self, pos: Position, balance: float = 0.0, total_pnl: float = 0.0):
         emoji = "✅" if pos.pnl >= 0 else "❌"
         await self.send(
-            f"{emoji} <b>Pozisyon Kapandı</b>\n\n"
+            f"{emoji} <b>Pozisyon Kapandı</b>\n"
+            f"📁 <code>{BOT_FILENAME}</code>\n\n"
             f"Sembol: <code>{pos.symbol}</code> | {pos.side}\n"
             f"Giriş → Çıkış: <code>{pos.entry_price:.6f}</code> → <code>{pos.close_price:.6f}</code>\n"
             f"Bu işlem PnL: <b>{pos.pnl:+.4f} USDT</b>\n"
@@ -815,6 +809,7 @@ class TelegramNotifier:
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         lines = [
             f"📊 <b>Saatlik Cüzdan Raporu</b> – {now}",
+            f"📁 Dosya: <code>{BOT_FILENAME}</code>",
             f"💰 Sanal cüzdan: <b>{balance:.2f} USDT</b>",
             f"📈 Toplam P&L: <b>{total_pnl:+.4f} USDT</b>",
             f"Bu saatte açılan: <b>{new_trades}</b> | Toplam işlem: <b>{total_trades}</b>",
@@ -837,8 +832,9 @@ class TelegramNotifier:
             return
         caption = (
             f"📈 <b>15m İndikatör Grafiği (~1 gün)</b>\n"
+            f"📁 <code>{BOT_FILENAME}</code>\n"
             f"Sembol: <code>{symbol}</code> | Fiyat: <code>{price:.4f}</code>\n"
-            f"Mavi kesik çizgi = EMA DİP | Kırmızı kesik çizgi = EMA TEPE"
+            f"Kesik çizgi = Giriş | Yeşil = TP | Turuncu = SL"
         )
         try:
             await self.bot.send_photo(
@@ -971,7 +967,7 @@ class PRFBBot:
 
     async def start(self):
         logger.info("=" * 50)
-        logger.info("Peak Reversal Futures Bot | 20 coin | 15m | gem1_final.py")
+        logger.info(f"Peak Reversal Futures Bot | 20 coin | 15m | {BOT_FILENAME}")
         await self.load_markets()
         await self.notifier.send_startup(len(self.symbols), self.symbols)
         self.running = True
