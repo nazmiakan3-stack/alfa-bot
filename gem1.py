@@ -823,24 +823,47 @@ class TelegramNotifier:
         )
 
     async def send_hourly(self, scanned: int, new_trades: int, open_pos: List[Position],
-                          total_pnl: float, total_trades: int, balance: float = 2000.0):
+                          total_pnl: float, total_trades: int, balance: float = 2000.0,
+                          prices: Optional[Dict[str, float]] = None):
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        prices = prices or {}
+        unrealized = 0.0
+        detail_lines = []
+        if open_pos:
+            for i, p in enumerate(open_pos[:20], 1):
+                px = prices.get(p.symbol)
+                if px is not None and px > 0:
+                    if p.side == "LONG":
+                        upnl = (px - p.entry_price) * p.quantity
+                    else:
+                        upnl = (p.entry_price - px) * p.quantity
+                    unrealized += upnl
+                    emoji = "🟢" if upnl >= 0 else "🔴"
+                    detail_lines.append(
+                        f"{i}. {emoji} <code>{p.symbol}</code> {p.side}\n"
+                        f"   Giriş {p.entry_price:.5f} → Fiyat {px:.5f}\n"
+                        f"   K/Z: <b>{upnl:+.4f} USDT</b> | TP {p.tp:.5f} | SL {p.sl:.5f}"
+                    )
+                else:
+                    detail_lines.append(
+                        f"{i}. <code>{p.symbol}</code> {p.side}\n"
+                        f"   Giriş {p.entry_price:.5f} | TP {p.tp:.5f} | SL {p.sl:.5f}"
+                    )
+
+        u_emoji = "🟢" if unrealized >= 0 else "🔴"
         lines = [
             f"📊 <b>Saatlik Cüzdan Raporu</b> – {now}",
             f"📁 Dosya: <code>{BOT_FILENAME}</code>",
             f"💰 Sanal cüzdan: <b>{balance:.2f} USDT</b>",
-            f"📈 Toplam P&L: <b>{total_pnl:+.4f} USDT</b>",
+            f"📈 Gerçekleşen P&L: <b>{total_pnl:+.4f} USDT</b>",
+            f"{u_emoji} Açık K/Z (anlık): <b>{unrealized:+.4f} USDT</b>",
             f"Bu saatte açılan: <b>{new_trades}</b> | Toplam işlem: <b>{total_trades}</b>",
             f"Aktif pozisyon: <b>{len(open_pos)}</b> / {scanned} coin",
             ""
         ]
-        if open_pos:
+        if detail_lines:
             lines.append("<b>Açık pozisyonlar:</b>")
-            for i, p in enumerate(open_pos[:20], 1):
-                lines.append(
-                    f"{i}. <code>{p.symbol}</code> {p.side}\n"
-                    f"   Giriş {p.entry_price:.5f} | TP {p.tp:.5f} | SL {p.sl:.5f}"
-                )
+            lines.extend(detail_lines)
         else:
             lines.append("Açık pozisyon yok.")
         await self.send("\n".join(lines))
@@ -973,11 +996,23 @@ class PRFBBot:
                 new = self.hourly_new_trades
                 self.hourly_new_trades = 0
                 stats = self.trader.get_stats()
+                open_pos = self.trader.get_open_positions()
+                # Güncel fiyatları çek (K/Z için)
+                prices: Dict[str, float] = {}
+                for p in open_pos:
+                    try:
+                        t = await self.exchange.fetch_ticker(p.symbol)
+                        last = t.get("last") or t.get("close")
+                        if last:
+                            prices[p.symbol] = float(last)
+                    except Exception as e:
+                        logger.warning(f"Rapor fiyat hatası {p.symbol}: {e}")
                 await self.notifier.send_hourly(
                     self.last_scan_count, new,
-                    self.trader.get_open_positions(),
+                    open_pos,
                     stats["total_pnl"], stats["total_trades"],
-                    stats.get("balance", 1000.0)
+                    stats.get("balance", 1000.0),
+                    prices=prices,
                 )
             except Exception as e:
                 logger.error(f"Rapor hatası: {e}")
