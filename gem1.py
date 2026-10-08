@@ -260,32 +260,31 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
 # Diğer indikatörler ±2 mum içinde şartı sağlarsa pozisyon açılır
 
 def _ema5_at_bottom(df: pd.DataFrame, idx: int) -> bool:
-    """EMA5 lokal dip + net yukarı dönüş (düşerken LONG açılmaz)"""
-    if idx < 3:
+    """EMA5 lokal dip bölgesinde + yeni yükseliş (geç giriş yok)"""
+    if idx < 4:
         return False
     e = df["ema5"]
-    start = max(0, idx - 8)
-    at_low = e.iloc[idx] <= e.iloc[start:idx + 1].min() * 1.002
-    # Net yükseliş zorunlu (önceki mumdan yüksek)
-    rising = e.iloc[idx] > e.iloc[idx - 1]
-    is_pivot = e.iloc[idx] <= e.iloc[idx - 1] and e.iloc[idx] <= e.iloc[idx - 2]
-    if idx < len(df) - 1:
-        is_pivot = is_pivot and e.iloc[idx] <= e.iloc[idx + 1]
-    return rising and (is_pivot or at_low)
+    win = e.iloc[max(0, idx - 12): idx + 1]
+    local_min = float(win.min())
+    # Bu mum veya 1 önceki mum dip bölgesinde olmalı
+    near_bottom = float(e.iloc[idx]) <= local_min * 1.004
+    prev_near = float(e.iloc[idx - 1]) <= local_min * 1.006
+    rising = float(e.iloc[idx]) > float(e.iloc[idx - 1])
+    # Dibe yakınken dönüş — 3+ mum geçmiş dip kabul edilmez
+    return rising and (near_bottom or prev_near)
 
 
 def _ema5_at_top(df: pd.DataFrame, idx: int) -> bool:
-    """EMA5 lokal tepe + net aşağı dönüş (yükselirken SHORT açılmaz)"""
-    if idx < 3:
+    """EMA5 lokal tepe bölgesinde + yeni düşüş (geç SHORT yok)"""
+    if idx < 4:
         return False
     e = df["ema5"]
-    start = max(0, idx - 8)
-    at_high = e.iloc[idx] >= e.iloc[start:idx + 1].max() * 0.998
-    falling = e.iloc[idx] < e.iloc[idx - 1]
-    is_pivot = e.iloc[idx] >= e.iloc[idx - 1] and e.iloc[idx] >= e.iloc[idx - 2]
-    if idx < len(df) - 1:
-        is_pivot = is_pivot and e.iloc[idx] >= e.iloc[idx + 1]
-    return falling and (is_pivot or at_high)
+    win = e.iloc[max(0, idx - 12): idx + 1]
+    local_max = float(win.max())
+    near_top = float(e.iloc[idx]) >= local_max * 0.996
+    prev_near = float(e.iloc[idx - 1]) >= local_max * 0.994
+    falling = float(e.iloc[idx]) < float(e.iloc[idx - 1])
+    return falling and (near_top or prev_near)
 
 
 def _kdj_long_ok(row) -> bool:
@@ -321,27 +320,47 @@ def _will_short_ok(row) -> bool:
 
 
 def _macd_long_ok(df: pd.DataFrame, idx: int) -> bool:
-    """DIF aşağıdan yukarı DEA kesiyor (bu mum veya 1-2 önceki)"""
-    for j in range(max(1, idx - 2), idx + 1):
-        if j < 1:
-            continue
+    """DIF/hist dip bölgesinden yukarı dönüş (geç giriş engeli)"""
+    if idx < 3:
+        return False
+    dif = df["macd_dif"]
+    hist = df["macd_hist"]
+    win_dif = dif.iloc[max(0, idx - 12): idx + 1]
+    local_min = float(win_dif.min())
+    near_low = float(dif.iloc[idx]) <= local_min + abs(local_min) * 0.15 + 1e-9
+    # Bu mum veya 1 önceki: kesişim veya hist yükseliş
+    for j in range(max(1, idx - 1), idx + 1):
         c, p = df.iloc[j], df.iloc[j - 1]
-        if p["macd_dif"] <= p["macd_dea"] and c["macd_dif"] > c["macd_dea"]:
+        cross_up = p["macd_dif"] <= p["macd_dea"] and c["macd_dif"] > c["macd_dea"]
+        hist_up = c["macd_hist"] > p["macd_hist"]
+        if (cross_up or hist_up) and (near_low or float(dif.iloc[j]) <= local_min * 0.85 if local_min < 0 else near_low):
             return True
-        # hist negatiften pozitife / yükseliyor
-        if c["macd_hist"] > p["macd_hist"] and p["macd_hist"] <= 0.02:
+        if cross_up and hist_up:
             return True
     return False
 
 
 def _macd_short_ok(df: pd.DataFrame, idx: int) -> bool:
-    for j in range(max(1, idx - 2), idx + 1):
-        if j < 1:
-            continue
+    """DIF/hist TEPE bölgesinden aşağı dönüş — kullanıcının işaretlediği tepe"""
+    if idx < 3:
+        return False
+    dif = df["macd_dif"]
+    hist = df["macd_hist"]
+    win_dif = dif.iloc[max(0, idx - 12): idx + 1]
+    win_hist = hist.iloc[max(0, idx - 12): idx + 1]
+    local_max_dif = float(win_dif.max())
+    local_max_hist = float(win_hist.max())
+    # DIF tepeye yakın (son 12 mumun üst %15'i)
+    span = abs(local_max_dif) + 1e-9
+    near_peak = float(dif.iloc[idx]) >= local_max_dif - span * 0.20
+    prev_peak = float(dif.iloc[idx - 1]) >= local_max_dif - span * 0.25
+    hist_near = float(hist.iloc[idx - 1]) >= local_max_hist * 0.70 if local_max_hist > 0 else True
+
+    for j in range(max(1, idx - 1), idx + 1):
         c, p = df.iloc[j], df.iloc[j - 1]
-        if p["macd_dif"] >= p["macd_dea"] and c["macd_dif"] < c["macd_dea"]:
-            return True
-        if c["macd_hist"] < p["macd_hist"] and p["macd_hist"] >= -0.02:
+        cross_dn = p["macd_dif"] >= p["macd_dea"] and c["macd_dif"] < c["macd_dea"]
+        hist_dn = c["macd_hist"] < p["macd_hist"]  # yeşil hacim doruktan düşüyor
+        if (near_peak or prev_peak) and (cross_dn or (hist_dn and hist_near)):
             return True
     return False
 
@@ -356,63 +375,66 @@ def _any_in_window(df: pd.DataFrame, idx: int, check_fn, window: int = 2) -> boo
 
 def check_long(df: pd.DataFrame, idx: int) -> bool:
     """
-    LONG:
-    1) EMA5 en dipte + dolmaya başlamış (ana tetik)
-    2) KDJ 0-25, StochRSI 0-35, RSI 0-35, Williams -100/-65
-       → bunlar ±2 mum içinde sağlanabilir
-    3) MACD DIF↑DEA veya hist yukarı (±2 mum)
+    LONG — dibe yakın giriş:
+    1) EMA5 dip bölgesinde + yükseliş
+    2) MACD DIF/hist dip + yukarı dönüş (zorunlu)
+    3) KDJ/Stoch/RSI/Williams aşırı satım (±1 mum)
     """
-    if idx < 3:
+    if idx < 4:
         return False
 
     if not _ema5_at_bottom(df, idx):
         return False
 
-    kdj_ok = _any_in_window(df, idx, _kdj_long_ok, 2)
-    stoch_ok = _any_in_window(df, idx, _stoch_long_ok, 2)
-    rsi_ok = _any_in_window(df, idx, _rsi_long_ok, 2)
-    will_ok = _any_in_window(df, idx, _will_long_ok, 2)
-    macd_ok = _macd_long_ok(df, idx)
+    if not _macd_long_ok(df, idx):
+        return False
 
-    # En az 3 yan şart + MACD (toplam esnek ama anlamlı)
-    side_score = sum([kdj_ok, stoch_ok, rsi_ok, will_ok, macd_ok])
+    kdj_ok = _any_in_window(df, idx, _kdj_long_ok, 1)
+    stoch_ok = _any_in_window(df, idx, _stoch_long_ok, 1)
+    rsi_ok = _any_in_window(df, idx, _rsi_long_ok, 1)
+    will_ok = _any_in_window(df, idx, _will_long_ok, 1)
+
+    side_score = sum([kdj_ok, stoch_ok, rsi_ok, will_ok])
     return side_score >= 3
 
 
 def check_short(df: pd.DataFrame, idx: int) -> bool:
     """
-    SHORT:
-    1) EMA5 en tepede + düşmeye başlamış (ana tetik)
-    2) KDJ 75-100, StochRSI 65-100, RSI 65-100, Williams -35/0
-       → ±2 mum içinde
-    3) MACD DIF↓DEA veya hist aşağı (±2 mum)
+    SHORT — tepeye yakın giriş:
+    1) EMA5 tepe bölgesinde + düşüş başlamış
+    2) MACD DIF/hist tepeye yakın + aşağı dönüş (zorunlu)
+    3) KDJ/Stoch/RSI/Williams aşırı alım (±1 mum, tepe anı)
     """
-    if idx < 3:
+    if idx < 4:
         return False
 
     if not _ema5_at_top(df, idx):
         return False
 
-    kdj_ok = _any_in_window(df, idx, _kdj_short_ok, 2)
-    stoch_ok = _any_in_window(df, idx, _stoch_short_ok, 2)
-    rsi_ok = _any_in_window(df, idx, _rsi_short_ok, 2)
-    will_ok = _any_in_window(df, idx, _will_short_ok, 2)
-    macd_ok = _macd_short_ok(df, idx)
+    # MACD tepe şartı zorunlu — geç girişleri keser
+    if not _macd_short_ok(df, idx):
+        return False
 
-    side_score = sum([kdj_ok, stoch_ok, rsi_ok, will_ok, macd_ok])
+    # Göstergeler tepeye yakın mumda (±1, daha sıkı)
+    kdj_ok = _any_in_window(df, idx, _kdj_short_ok, 1)
+    stoch_ok = _any_in_window(df, idx, _stoch_short_ok, 1)
+    rsi_ok = _any_in_window(df, idx, _rsi_short_ok, 1)
+    will_ok = _any_in_window(df, idx, _will_short_ok, 1)
+
+    side_score = sum([kdj_ok, stoch_ok, rsi_ok, will_ok])
     return side_score >= 3
 
 
 def detect_signal(df: pd.DataFrame) -> Optional[str]:
+    """Sadece son 2 kapalı mum — eski tepeden geç giriş yok"""
     if df is None or len(df) < 30:
         return None
-    # Son 6 muma bak (±2 + biraz pay)
-    start = max(len(df) - 1 - 6, 3)
-    for idx in range(len(df) - 1, start - 1, -1):
-        if check_long(df, idx):
-            return "LONG"
+    # Son mum genelde henüz kapanmamış olabilir; -2 ve -1
+    for idx in range(len(df) - 1, max(len(df) - 3, 3) - 1, -1):
         if check_short(df, idx):
             return "SHORT"
+        if check_long(df, idx):
+            return "LONG"
     return None
 
 
