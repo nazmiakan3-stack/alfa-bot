@@ -259,174 +259,174 @@ def calculate_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
 # Ana tetik: EMA5 tepe/dip
 # Diğer indikatörler ±2 mum içinde şartı sağlarsa pozisyon açılır
 
-def _pivot_ema5_bottom(df: pd.DataFrame, idx: int) -> Optional[int]:
-    """Son 10 mumda EMA5 dip indeksi; dip idx'e en fazla 2 mum uzaksa döner"""
-    if idx < 4:
-        return None
-    e = df["ema5"]
-    start = max(0, idx - 10)
-    win = e.iloc[start: idx + 1]
-    peak_i = int(start + win.values.argmin())
-    if idx - peak_i > 2:
-        return None
-    # Dönüş: şimdi yükseliyor veya dip mumdayız ve sonraki yukarı
-    if float(e.iloc[idx]) > float(e.iloc[idx - 1]):
-        return peak_i
-    if peak_i == idx and idx >= 1 and float(e.iloc[idx]) <= float(e.iloc[idx - 1]):
-        return peak_i
-    return None
-
-
-def _pivot_ema5_top(df: pd.DataFrame, idx: int) -> Optional[int]:
-    """Son 10 mumda EMA5 tepe indeksi; tepe idx'e en fazla 2 mum uzaksa döner"""
-    if idx < 4:
-        return None
-    e = df["ema5"]
-    start = max(0, idx - 10)
-    win = e.iloc[start: idx + 1]
-    peak_i = int(start + win.values.argmax())
-    if idx - peak_i > 2:
-        return None  # tepe 3+ mum önce → geç, alma
-    # Dönüş aşağı: EMA5 düşüyor veya tepe mumunda
-    if float(e.iloc[idx]) < float(e.iloc[idx - 1]):
-        return peak_i
-    if peak_i == idx and idx >= 1 and float(e.iloc[idx]) >= float(e.iloc[idx - 1]):
-        return peak_i
-    return None
-
-
-def _ema5_at_bottom(df: pd.DataFrame, idx: int) -> bool:
-    return _pivot_ema5_bottom(df, idx) is not None
-
-
-def _ema5_at_top(df: pd.DataFrame, idx: int) -> bool:
-    return _pivot_ema5_top(df, idx) is not None
-
-
-def _kdj_long_ok(row) -> bool:
-    return (0 <= row["kdj_k"] <= 25) or (0 <= row["kdj_j"] <= 25)
-
-
-def _kdj_short_ok(row) -> bool:
-    return (75 <= row["kdj_k"] <= 100) or (75 <= row["kdj_j"] <= 100)
-
-
-def _stoch_long_ok(row) -> bool:
-    return 0 <= row["stochrsi_k"] <= 35
-
-
-def _stoch_short_ok(row) -> bool:
-    return 65 <= row["stochrsi_k"] <= 100
-
-
-def _rsi_long_ok(row) -> bool:
-    return (0 <= row["rsi14"] <= 35) or (0 <= row["rsi6"] <= 35)
-
-
-def _rsi_short_ok(row) -> bool:
-    return (65 <= row["rsi14"] <= 100) or (65 <= row["rsi6"] <= 100)
-
-
-def _will_long_ok(row) -> bool:
-    return -100 <= row["williams_r"] <= -65
-
-
-def _will_short_ok(row) -> bool:
-    return -35 <= row["williams_r"] <= 0
-
-
-def _macd_long_ok(df: pd.DataFrame, idx: int) -> bool:
-    """DIF/hist dip bölgesinden yukarı dönüş (geç giriş engeli)"""
-    if idx < 3:
-        return False
-    dif = df["macd_dif"]
-    hist = df["macd_hist"]
-    win_dif = dif.iloc[max(0, idx - 12): idx + 1]
-    local_min = float(win_dif.min())
-    near_low = float(dif.iloc[idx]) <= local_min + abs(local_min) * 0.15 + 1e-9
-    # Bu mum veya 1 önceki: kesişim veya hist yükseliş
-    for j in range(max(1, idx - 1), idx + 1):
-        c, p = df.iloc[j], df.iloc[j - 1]
-        cross_up = p["macd_dif"] <= p["macd_dea"] and c["macd_dif"] > c["macd_dea"]
-        hist_up = c["macd_hist"] > p["macd_hist"]
-        if (cross_up or hist_up) and (near_low or float(dif.iloc[j]) <= local_min * 0.85 if local_min < 0 else near_low):
-            return True
-        if cross_up and hist_up:
-            return True
-    return False
-
-
-def _macd_short_ok(df: pd.DataFrame, idx: int) -> bool:
-    """MACD tepe son 1-2 mumda; hist/DIF doruktan dönüş"""
-    if idx < 3:
-        return False
-    dif = df["macd_dif"]
-    hist = df["macd_hist"]
-    start = max(0, idx - 10)
-    win_dif = dif.iloc[start: idx + 1]
-    win_hist = hist.iloc[start: idx + 1]
-    dif_peak_i = int(start + win_dif.values.argmax())
-    hist_peak_i = int(start + win_hist.values.argmax())
-    # DIF veya hist tepesi en fazla 2 mum önce
-    if min(idx - dif_peak_i, idx - hist_peak_i) > 2:
-        return False
-    c, p = df.iloc[idx], df.iloc[idx - 1]
-    cross_dn = p["macd_dif"] >= p["macd_dea"] and c["macd_dif"] < c["macd_dea"]
-    hist_dn = float(c["macd_hist"]) < float(p["macd_hist"])
-    dif_dn = float(c["macd_dif"]) < float(p["macd_dif"])
-    # Tepe yakın + aşağı dönüş
-    return cross_dn or hist_dn or dif_dn
-
-
-def _any_in_window(df: pd.DataFrame, idx: int, check_fn, window: int = 2) -> bool:
-    """±window mum içinde check_fn True ise OK"""
+def _any_in_window(df: pd.DataFrame, idx: int, check_fn, window: int = 1) -> bool:
+    """±window mum içinde check_fn True ise OK (varsayılan ±1)"""
     for j in range(max(0, idx - window), min(len(df), idx + window + 1)):
         if check_fn(df.iloc[j]):
             return True
     return False
 
 
-def check_long(df: pd.DataFrame, idx: int) -> bool:
-    """LONG: EMA5 dip (max 2 mum önce) + göstergeler ±2 mum"""
-    if idx < 4:
-        return False
-    pivot = _pivot_ema5_bottom(df, idx)
-    if pivot is None:
-        return False
-    # Göstergeleri pivot etrafında ±2 kontrol et
-    kdj_ok = _any_in_window(df, pivot, _kdj_long_ok, 2)
-    stoch_ok = _any_in_window(df, pivot, _stoch_long_ok, 2)
-    rsi_ok = _any_in_window(df, pivot, _rsi_long_ok, 2)
-    will_ok = _any_in_window(df, pivot, _will_long_ok, 2)
-    macd_ok = _macd_long_ok(df, idx)
-    return sum([kdj_ok, stoch_ok, rsi_ok, will_ok, macd_ok]) >= 3
+# SATIŞ bölgesi = yüksek değerler → SHORT desteği
+# ALIŞ  bölgesi = düşük değerler  → LONG desteği
+
+def _kdj_sell_zone(row) -> bool:
+    return (row["kdj_k"] >= 70) or (row["kdj_j"] >= 70)
+
+
+def _kdj_buy_zone(row) -> bool:
+    return (row["kdj_k"] <= 30) or (row["kdj_j"] <= 30)
+
+
+def _stoch_sell_zone(row) -> bool:
+    return row["stochrsi_k"] >= 65
+
+
+def _stoch_buy_zone(row) -> bool:
+    return row["stochrsi_k"] <= 35
+
+
+def _rsi_sell_zone(row) -> bool:
+    return (row["rsi14"] >= 60) or (row["rsi6"] >= 60)
+
+
+def _rsi_buy_zone(row) -> bool:
+    return (row["rsi14"] <= 40) or (row["rsi6"] <= 40)
+
+
+def _will_sell_zone(row) -> bool:
+    return -30 <= row["williams_r"] <= 0
+
+
+def _will_buy_zone(row) -> bool:
+    return -100 <= row["williams_r"] <= -70
+
+
+def _macd_peak_pivot(df: pd.DataFrame, idx: int) -> Optional[int]:
+    """
+    SHORT ana tetik: DIF ve hist (yeşil hacim) en tepede.
+    Tepe en fazla 1 mum önce olmalı.
+    """
+    if idx < 5:
+        return None
+    dif = df["macd_dif"]
+    hist = df["macd_hist"]
+    start = max(0, idx - 12)
+    win_dif = dif.iloc[start: idx + 1]
+    win_hist = hist.iloc[start: idx + 1]
+    dif_peak = int(start + win_dif.values.argmax())
+    hist_peak = int(start + win_hist.values.argmax())
+    # İkisinden en az biri idx veya idx-1'de tepe
+    peaks = [p for p in (dif_peak, hist_peak) if idx - p <= 1]
+    if not peaks:
+        return None
+    pivot = max(peaks)  # en yakın tepe
+    # Dönüş aşağı: hist veya DIF düşüyor
+    c, p = df.iloc[idx], df.iloc[idx - 1]
+    turning_down = (
+        float(c["macd_hist"]) < float(p["macd_hist"])
+        or float(c["macd_dif"]) < float(p["macd_dif"])
+        or (p["macd_dif"] >= p["macd_dea"] and c["macd_dif"] < c["macd_dea"])
+    )
+    if not turning_down:
+        return None
+    return pivot
+
+
+def _macd_bottom_pivot(df: pd.DataFrame, idx: int) -> Optional[int]:
+    """
+    LONG ana tetik: DIF ve hist en dipte.
+    Dip en fazla 1 mum önce olmalı.
+    """
+    if idx < 5:
+        return None
+    dif = df["macd_dif"]
+    hist = df["macd_hist"]
+    start = max(0, idx - 12)
+    win_dif = dif.iloc[start: idx + 1]
+    win_hist = hist.iloc[start: idx + 1]
+    dif_bot = int(start + win_dif.values.argmin())
+    hist_bot = int(start + win_hist.values.argmin())
+    bottoms = [b for b in (dif_bot, hist_bot) if idx - b <= 1]
+    if not bottoms:
+        return None
+    pivot = max(bottoms)
+    c, p = df.iloc[idx], df.iloc[idx - 1]
+    turning_up = (
+        float(c["macd_hist"]) > float(p["macd_hist"])
+        or float(c["macd_dif"]) > float(p["macd_dif"])
+        or (p["macd_dif"] <= p["macd_dea"] and c["macd_dif"] > c["macd_dea"])
+    )
+    if not turning_up:
+        return None
+    return pivot
 
 
 def check_short(df: pd.DataFrame, idx: int) -> bool:
     """
-    SHORT: EMA5 tepe en fazla 2 mum önce.
-    KDJ / Stoch / RSI / Williams / MACD → tepeden 1-2 mum önce/sonra uyumlu.
-    3+ mum geçmiş tepe → giriş YOK.
+    SHORT = SATIŞ:
+    1) MACD DIF+hist EN TEPEDE (max 1 mum önce) + aşağı dönüş → ZORUNLU
+    2) Destek: KDJ/Stoch/RSI/Williams SATIŞ bölgesinde (yüksek) ±1 mum
+    3) Engel: göstergeler ALIŞ bölgesinde (düşük/ters) → SHORT YOK
     """
-    if idx < 4:
+    if idx < 5:
         return False
-    pivot = _pivot_ema5_top(df, idx)
+    pivot = _macd_peak_pivot(df, idx)
     if pivot is None:
         return False
-    # Göstergeler TEPE mumuna göre ±2 (senin işaretlediğin bölge)
-    kdj_ok = _any_in_window(df, pivot, _kdj_short_ok, 2)
-    stoch_ok = _any_in_window(df, pivot, _stoch_short_ok, 2)
-    rsi_ok = _any_in_window(df, pivot, _rsi_short_ok, 2)
-    will_ok = _any_in_window(df, pivot, _will_short_ok, 2)
-    macd_ok = _macd_short_ok(df, idx)
-    return sum([kdj_ok, stoch_ok, rsi_ok, will_ok, macd_ok]) >= 3
+
+    support = sum([
+        _any_in_window(df, pivot, _kdj_sell_zone, 1),
+        _any_in_window(df, pivot, _stoch_sell_zone, 1),
+        _any_in_window(df, pivot, _rsi_sell_zone, 1),
+        _any_in_window(df, pivot, _will_sell_zone, 1),
+    ])
+    conflict = sum([
+        _any_in_window(df, pivot, _kdj_buy_zone, 1),
+        _any_in_window(df, pivot, _stoch_buy_zone, 1),
+        _any_in_window(df, pivot, _rsi_buy_zone, 1),
+        _any_in_window(df, pivot, _will_buy_zone, 1),
+    ])
+    if conflict >= 2:
+        return False
+    return support >= 2
+
+
+def check_long(df: pd.DataFrame, idx: int) -> bool:
+    """
+    LONG = ALIŞ:
+    1) MACD DIF+hist EN DİPTE (max 1 mum önce) + yukarı dönüş → ZORUNLU
+    2) Destek: göstergeler ALIŞ bölgesinde (düşük) ±1 mum
+    3) Engel: göstergeler SATIŞ bölgesinde (yüksek/ters) → LONG YOK
+    """
+    if idx < 5:
+        return False
+    pivot = _macd_bottom_pivot(df, idx)
+    if pivot is None:
+        return False
+
+    support = sum([
+        _any_in_window(df, pivot, _kdj_buy_zone, 1),
+        _any_in_window(df, pivot, _stoch_buy_zone, 1),
+        _any_in_window(df, pivot, _rsi_buy_zone, 1),
+        _any_in_window(df, pivot, _will_buy_zone, 1),
+    ])
+    conflict = sum([
+        _any_in_window(df, pivot, _kdj_sell_zone, 1),
+        _any_in_window(df, pivot, _stoch_sell_zone, 1),
+        _any_in_window(df, pivot, _rsi_sell_zone, 1),
+        _any_in_window(df, pivot, _will_sell_zone, 1),
+    ])
+    if conflict >= 2:
+        return False
+    return support >= 2
 
 
 def detect_signal(df: pd.DataFrame) -> Optional[str]:
-    """Sadece son 2 mum — tepeden 3+ mum sonra asla girme"""
+    """Sadece son 1-2 mum — MACD tepesinden/dibinden 1 mumdan fazla uzaksa girme"""
     if df is None or len(df) < 30:
         return None
-    for idx in range(len(df) - 1, max(len(df) - 3, 3) - 1, -1):
+    for idx in range(len(df) - 1, max(len(df) - 3, 5) - 1, -1):
         if check_short(df, idx):
             return "SHORT"
         if check_long(df, idx):
@@ -446,13 +446,13 @@ def find_signal_indices(df: pd.DataFrame, lookback: int = 96) -> Dict[str, List[
 
 
 def find_ema_extremes(df: pd.DataFrame, lookback: int = 96) -> Dict[str, List[int]]:
-    """Grafikte EMA5 tepe/dip noktalarını işaretlemek için"""
+    """MACD tepe/dip (grafik için, opsiyonel)"""
     bottoms, tops = [], []
-    start = max(3, len(df) - lookback)
+    start = max(5, len(df) - lookback)
     for idx in range(start, len(df)):
-        if _ema5_at_bottom(df, idx):
+        if _macd_bottom_pivot(df, idx) is not None:
             bottoms.append(idx - start)
-        if _ema5_at_top(df, idx):
+        if _macd_peak_pivot(df, idx) is not None:
             tops.append(idx - start)
     return {"bottoms": bottoms, "tops": tops}
 
